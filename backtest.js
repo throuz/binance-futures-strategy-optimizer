@@ -26,7 +26,6 @@ const CONFIG = {
   RSI_PERIOD_SETTING: { min: 1, max: 100, step: 1 },
   RSI_LONG_LEVEL_SETTING: { min: 51, max: 100, step: 1 },
   RSI_SHORT_LEVEL_SETTING: { min: 1, max: 50, step: 1 },
-  MA_PERIOD_SETTING: { min: 1, max: 200, step: 1 },
   LEVERAGE_SETTING: { min: 1, max: 1, step: 1 },
   RANDOM_SAMPLE_NUMBER: 100000, // number or null
   KLINE_START_TIME: getTimestampYearsAgo(10), // timestamp or null
@@ -200,7 +199,6 @@ const getKlineData = async () => {
 let klineCache = [];
 let closePricesCache = null;
 let rsiCache = new Map();
-let maCache = new Map();
 
 /** ---------- 快取判斷 ---------- */
 // In backtest mode, only check if cache is empty (no expiration check needed)
@@ -210,10 +208,6 @@ const shouldRefreshKlineCache = (data) => {
 
 const shouldRefreshRsiCache = () => {
   return rsiCache.size === 0;
-};
-
-const shouldRefreshMaCache = () => {
-  return maCache.size === 0;
 };
 
 /** ---------- 快取 Kline & ClosePrices ---------- */
@@ -321,62 +315,6 @@ const getRsiCache = async () => {
   return rsiCache;
 };
 
-/** ---------- MA 計算 ---------- */
-const computeMA = (values, periods) => {
-  const results = {};
-  const valuesLength = values.length;
-  if (valuesLength < 1) {
-    for (const period of periods)
-      results[period] = new Array(valuesLength).fill(null);
-    return results;
-  }
-
-  for (const period of periods) {
-    const result = new Array(valuesLength).fill(null);
-    if (valuesLength < period) {
-      results[period] = result;
-      continue;
-    }
-
-    // Calculate initial sum for first MA value
-    let sum = 0;
-    for (let i = 0; i < period; i++) {
-      sum += values[i];
-    }
-    result[period - 1] = sum / period;
-
-    // Calculate remaining MA values using sliding window
-    for (let i = period; i < valuesLength; i++) {
-      sum = sum - values[i - period] + values[i];
-      result[i] = sum / period;
-    }
-
-    results[period] = result;
-  }
-
-  return results;
-};
-
-/** ---------- 快取 MA ---------- */
-const getMaCache = async () => {
-  if (shouldRefreshMaCache()) {
-    const values = await getClosePricesCache();
-
-    const periods = [];
-    for (
-      let period = CONFIG.MA_PERIOD_SETTING.min;
-      period <= CONFIG.MA_PERIOD_SETTING.max;
-      period += CONFIG.MA_PERIOD_SETTING.step
-    ) {
-      periods.push(period);
-    }
-
-    const results = computeMA(values, periods);
-    for (const period of periods) maCache.set(period, results[period]);
-  }
-  return maCache;
-};
-
 // ============================================================================
 // Backtest Functions
 // ============================================================================
@@ -432,21 +370,13 @@ const calculateHours = (open, close) => (close - open) / CONFIG.HOUR_MS;
 // ============================================================================
 
 class BacktestEngine {
-  constructor(
-    cachedKlineData,
-    cachedRsiData,
-    cachedMaData,
-    stepSize,
-    strategyParams
-  ) {
+  constructor(cachedKlineData, cachedRsiData, stepSize, strategyParams) {
     this.cachedKlineData = cachedKlineData;
     this.cachedRsiData = cachedRsiData;
-    this.cachedMaData = cachedMaData;
     this.stepSize = stepSize;
     this.rsiPeriod = strategyParams.rsiPeriod;
     this.rsiLongLevel = strategyParams.rsiLongLevel;
     this.rsiShortLevel = strategyParams.rsiShortLevel;
-    this.maPeriod = strategyParams.maPeriod;
     this.leverage = strategyParams.leverage;
     this.shouldLogResults = strategyParams.shouldLogResults || false;
 
@@ -471,13 +401,8 @@ class BacktestEngine {
 
     // 预计算数据
     this.rsiData = cachedRsiData.get(this.rsiPeriod);
-    this.maData = cachedMaData.get(this.maPeriod);
-    // Start index should be max of RSI period and MA period to ensure both indicators are available
-    const maxIndicatorPeriod = Math.max(
-      CONFIG.RSI_PERIOD_SETTING.max,
-      CONFIG.MA_PERIOD_SETTING.max
-    );
-    this.startIndex = maxIndicatorPeriod + 1;
+    // Start index should be RSI period to ensure indicator is available
+    this.startIndex = CONFIG.RSI_PERIOD_SETTING.max + 1;
     this.dataLength = cachedKlineData.length;
 
     // 预计算常量
@@ -487,21 +412,11 @@ class BacktestEngine {
     this.hourMsReciprocal = 1 / CONFIG.HOUR_MS;
   }
 
-  getSignal(preRsi, preMa, preClosePrice) {
-    // MA signal: price above MA = bullish, price below MA = bearish
-    const isPriceAboveMA = preClosePrice > preMa;
-
-    if (
-      this.positionType === "NONE" &&
-      preRsi > this.rsiLongLevel &&
-      isPriceAboveMA
-    ) {
+  getSignal(preRsi) {
+    if (this.positionType === "NONE" && preRsi > this.rsiLongLevel) {
       return "OPEN_LONG";
     }
-    if (
-      this.positionType === "LONG" &&
-      (preRsi < this.rsiShortLevel || !isPriceAboveMA)
-    ) {
+    if (this.positionType === "LONG" && preRsi < this.rsiShortLevel) {
       return "CLOSE_LONG";
     }
     return "NONE";
@@ -654,20 +569,15 @@ class BacktestEngine {
 
   run() {
     if (!this.rsiData || this.rsiData.length === 0) return null;
-    if (!this.maData || this.maData.length === 0) return null;
 
     for (let i = this.startIndex; i < this.dataLength; i++) {
       const curKline = this.cachedKlineData[i];
       const curClosePrice = curKline.closePrice;
       const curLowPrice = curKline.lowPrice;
 
-      const preKline = this.cachedKlineData[i - 1];
-      const preClosePrice = preKline.closePrice;
-
       const preRsi = this.rsiData[i - 1];
-      const preMa = this.maData[i - 1];
 
-      const signal = this.getSignal(preRsi, preMa, preClosePrice);
+      const signal = this.getSignal(preRsi);
 
       if (signal === "OPEN_LONG") {
         this.openLongPosition(curKline);
@@ -705,7 +615,6 @@ class BacktestEngine {
       rsiPeriod: this.rsiPeriod,
       rsiLongLevel: this.rsiLongLevel,
       rsiShortLevel: this.rsiShortLevel,
-      maPeriod: this.maPeriod,
       leverage: this.leverage,
       totalTrades: this.totalTrades,
       winningTrades: this.winningTrades,
@@ -726,28 +635,19 @@ const getBacktestResult = ({
   shouldLogResults,
   cachedKlineData,
   cachedRsiData,
-  cachedMaData,
   stepSize,
   rsiPeriod,
   rsiLongLevel,
   rsiShortLevel,
-  maPeriod,
   leverage
 }) => {
-  const engine = new BacktestEngine(
-    cachedKlineData,
-    cachedRsiData,
-    cachedMaData,
-    stepSize,
-    {
-      rsiPeriod,
-      rsiLongLevel,
-      rsiShortLevel,
-      maPeriod,
-      leverage,
-      shouldLogResults
-    }
-  );
+  const engine = new BacktestEngine(cachedKlineData, cachedRsiData, stepSize, {
+    rsiPeriod,
+    rsiLongLevel,
+    rsiShortLevel,
+    leverage,
+    shouldLogResults
+  });
   return engine.run();
 };
 
@@ -794,23 +694,12 @@ const getSettings = () => {
             digit: 0
           })
         ) {
-          for (
-            let maPeriod = CONFIG.MA_PERIOD_SETTING.min;
-            maPeriod <= CONFIG.MA_PERIOD_SETTING.max;
-            maPeriod = getAddedNumber({
-              number: maPeriod,
-              addNumber: CONFIG.MA_PERIOD_SETTING.step,
-              digit: 0
-            })
-          ) {
-            settings.push({
-              rsiPeriod,
-              rsiLongLevel,
-              rsiShortLevel,
-              maPeriod,
-              leverage
-            });
-          }
+          settings.push({
+            rsiPeriod,
+            rsiLongLevel,
+            rsiShortLevel,
+            leverage
+          });
         }
       }
     }
@@ -840,13 +729,11 @@ const getBestResult = async () => {
   progressBar.start(randomSettings.length, 0);
 
   let bestResult = { fund: 0, totalReturn: -1 };
-  const [cachedKlineData, cachedRsiData, cachedMaData, stepSize] =
-    await Promise.all([
-      getKlineCache(),
-      getRsiCache(),
-      getMaCache(),
-      getStepSize()
-    ]);
+  const [cachedKlineData, cachedRsiData, stepSize] = await Promise.all([
+    getKlineCache(),
+    getRsiCache(),
+    getStepSize()
+  ]);
 
   // Single-threaded loop over settings (keeps original behavior but with faster backtest)
   for (const setting of randomSettings) {
@@ -854,7 +741,6 @@ const getBestResult = async () => {
       shouldLogResults: false,
       cachedKlineData,
       cachedRsiData,
-      cachedMaData,
       stepSize,
       ...setting
     });
@@ -882,7 +768,6 @@ if (bestResult.fund > 0) {
     rsiPeriod,
     rsiLongLevel,
     rsiShortLevel,
-    maPeriod,
     leverage,
     totalTrades,
     winningTrades,
@@ -894,25 +779,21 @@ if (bestResult.fund > 0) {
     averageHoldTimeHours
   } = bestResult;
 
-  const [cachedKlineData, cachedRsiData, cachedMaData, stepSize] =
-    await Promise.all([
-      getKlineCache(),
-      getRsiCache(),
-      getMaCache(),
-      getStepSize()
-    ]);
+  const [cachedKlineData, cachedRsiData, stepSize] = await Promise.all([
+    getKlineCache(),
+    getRsiCache(),
+    getStepSize()
+  ]);
 
   // Run detailed backtest to get trade records
   const detailedResult = getBacktestResult({
     shouldLogResults: true,
     cachedKlineData,
     cachedRsiData,
-    cachedMaData,
     stepSize,
     rsiPeriod,
     rsiLongLevel,
     rsiShortLevel,
-    maPeriod,
     leverage
   });
 
@@ -955,7 +836,6 @@ if (bestResult.fund > 0) {
   console.log(`  RSI Period:       ${rsiPeriod}`);
   console.log(`  RSI Long Level:   ${rsiLongLevel}`);
   console.log(`  RSI Short Level:  ${rsiShortLevel}`);
-  console.log(`  MA Period:        ${maPeriod}`);
   console.log(`  Leverage:         ${leverage}x`);
 
   console.log("\nTrading Statistics");
