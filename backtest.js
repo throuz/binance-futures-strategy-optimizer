@@ -1,12 +1,4 @@
-// ============================================================================
-// Binance RSI Bot - Consolidated Single File
-// ============================================================================
-
 import { Presets, SingleBar } from "cli-progress";
-
-// ============================================================================
-// Configuration
-// ============================================================================
 
 function getTimestampYearsAgo(years) {
   const currentDate = new Date();
@@ -17,38 +9,32 @@ function getTimestampYearsAgo(years) {
 
 const CONFIG = {
   SYMBOL: "BTCUSDT",
-  ORDER_AMOUNT_PERCENT: 100, // 100%
+  ORDER_AMOUNT_PERCENT: 100,
   KLINE_INTERVAL: "1h",
   KLINE_LIMIT: 1500,
   INITIAL_FUNDING: 100,
-  FEE: 0.0005, // 0.05%
-  FUNDING_RATE: 0.0001, // 0.01%
-  // Use different RSI period ranges for long-term (entry) and short-term (exit) signals
+  FEE: 0.0005,
+  FUNDING_RATE: 0.0001,
   RSI_LONG_PERIOD_SETTING: { min: 5, max: 100, step: 5 },
   RSI_SHORT_PERIOD_SETTING: { min: 5, max: 100, step: 5 },
   RSI_LONG_LEVEL_SETTING: { min: 5, max: 100, step: 5 },
   RSI_SHORT_LEVEL_SETTING: { min: 5, max: 100, step: 5 },
   LEVERAGE_SETTING: { min: 1, max: 5, step: 1 },
-  RANDOM_SAMPLE_NUMBER: null, // number or null
-  KLINE_START_TIME: getTimestampYearsAgo(10), // timestamp or null
+  RANDOM_SAMPLE_NUMBER: null,
+  KLINE_START_TIME: getTimestampYearsAgo(10),
   IS_KLINE_START_TIME_TO_NOW: true,
   HOUR_MS: 1000 * 60 * 60,
-  FUNDING_PERIOD_MS: 8 * 1000 * 60 * 60, // 8 hours
-  MAX_DRAWDOWN_THRESHOLD: 0.5 // 50% - 最大可接受回撤（设为 null 则不限制）
+  FUNDING_PERIOD_MS: 8 * 1000 * 60 * 60,
+  MAX_DRAWDOWN_THRESHOLD: 0.5
 };
 
-// ============================================================================
-// Cache Implementation
-// ============================================================================
-
 const cache = new Map();
-const CACHE_TTL = 60 * 1000; // 60 seconds in milliseconds
+const CACHE_TTL = 60 * 1000;
 
 const nodeCache = {
   has(key) {
     const item = cache.get(key);
     if (!item) return false;
-    // Check if expired
     if (Date.now() > item.expiry) {
       cache.delete(key);
       return false;
@@ -58,7 +44,6 @@ const nodeCache = {
   get(key) {
     const item = cache.get(key);
     if (!item) return undefined;
-    // Check if expired
     if (Date.now() > item.expiry) {
       cache.delete(key);
       return undefined;
@@ -73,13 +58,8 @@ const nodeCache = {
   }
 };
 
-// ============================================================================
-// Web Services
-// ============================================================================
-
 const BASE_URL = "https://fapi.binance.com";
 
-// Helper function to build query string from params
 const buildQueryString = (params) => {
   const queryParams = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -90,7 +70,6 @@ const buildQueryString = (params) => {
   return queryParams.toString();
 };
 
-// Native fetch-based API client
 const binanceFuturesAPI = {
   async get(path, options = {}) {
     const { params = {} } = options;
@@ -113,10 +92,6 @@ const binanceFuturesAPI = {
   }
 };
 
-// ============================================================================
-// API Functions
-// ============================================================================
-
 const retry = async (fn, retries = 3, delay = 1000) => {
   for (let i = 0; i < retries; i++) {
     try {
@@ -129,7 +104,6 @@ const retry = async (fn, retries = 3, delay = 1000) => {
 };
 
 const getBinanceFuturesAPI = async (path, params = {}) => {
-  // Create cache key from path and params
   const paramsString = JSON.stringify(params);
   const key = path + "/" + paramsString;
   if (nodeCache.has(key)) {
@@ -145,8 +119,6 @@ const getBinanceFuturesAPI = async (path, params = {}) => {
   return await retry(fetchData);
 };
 
-// GET
-
 const exchangeInformationAPI = async () => {
   const responseData = await getBinanceFuturesAPI("/fapi/v1/exchangeInfo", {});
   return responseData;
@@ -157,11 +129,6 @@ const klineDataAPI = async (params) => {
   return responseData;
 };
 
-// ============================================================================
-// Cached Data Functions
-// ============================================================================
-
-/** ---------- Kline Data Functions ---------- */
 const getOriginalKlineData = async () => {
   const now = Date.now();
   const originalKlineData = [];
@@ -174,7 +141,6 @@ const getOriginalKlineData = async () => {
       startTime
     };
     const klineData = await klineDataAPI(params);
-    // Use push with spread for better performance than concat
     originalKlineData.push(...klineData);
     if (klineData.length > 0) {
       startTime = klineData[klineData.length - 1][6] + 1;
@@ -198,13 +164,10 @@ const getKlineData = async () => {
   return results;
 };
 
-/** ---------- 快取變數 ---------- */
 let klineCache = [];
 let closePricesCache = null;
 let rsiCache = new Map();
 
-/** ---------- 快取判斷 ---------- */
-// In backtest mode, only check if cache is empty (no expiration check needed)
 const shouldRefreshKlineCache = (data) => {
   return data.length === 0;
 };
@@ -213,7 +176,6 @@ const shouldRefreshRsiCache = () => {
   return rsiCache.size === 0;
 };
 
-/** ---------- 快取 Kline & ClosePrices ---------- */
 const getKlineCache = async () => {
   if (shouldRefreshKlineCache(klineCache)) {
     const klineData = await getKlineData();
@@ -236,7 +198,6 @@ const getClosePricesCache = async () => {
   return closePricesCache;
 };
 
-/** ---------- RSI 計算 ---------- */
 const computeRSI = (values, periods) => {
   const results = {};
   const valuesLength = values.length;
@@ -246,7 +207,6 @@ const computeRSI = (values, periods) => {
     return results;
   }
 
-  // Pre-compute changes array once (more efficient than push in loop)
   const changesLength = valuesLength - 1;
   const changes = new Array(changesLength);
   for (let i = 0; i < changesLength; i++) {
@@ -260,7 +220,6 @@ const computeRSI = (values, periods) => {
       continue;
     }
 
-    // Initialize gain and loss
     let gain = 0;
     let loss = 0;
     for (let i = 0; i < period; i++) {
@@ -268,15 +227,13 @@ const computeRSI = (values, periods) => {
       if (change > 0) {
         gain += change;
       } else {
-        loss -= change; // More efficient than -change
+        loss -= change;
       }
     }
 
-    // Pre-compute period multiplier for efficiency
     const periodMinusOne = period - 1;
     const periodReciprocal = 1 / period;
 
-    // Main RSI calculation loop
     for (let i = period; i < valuesLength; i++) {
       const change = changes[i - 1];
       const maxChange = change > 0 ? change : 0;
@@ -298,7 +255,6 @@ const computeRSI = (values, periods) => {
   return results;
 };
 
-/** ---------- 快取 RSI ---------- */
 const getRsiCache = async () => {
   if (shouldRefreshRsiCache()) {
     const values = await getClosePricesCache();
@@ -326,11 +282,6 @@ const getRsiCache = async () => {
   return rsiCache;
 };
 
-// ============================================================================
-// Backtest Functions
-// ============================================================================
-
-// Only use Date formatting when logging (avoid heavy usage inside loop)
 const getReadableTime = (timestamp) => {
   const date = new Date(timestamp);
   const pad = (n) => String(n).padStart(2, "0");
@@ -341,7 +292,6 @@ const getReadableTime = (timestamp) => {
   )}`;
 };
 
-// Short date format for trade history
 const getShortDate = (timestamp) => {
   const date = new Date(timestamp);
   const pad = (n) => String(n).padStart(2, "0");
@@ -350,7 +300,6 @@ const getShortDate = (timestamp) => {
   )}`;
 };
 
-// Helper functions - Cache precision calculations
 const precisionCache = new Map();
 const getPrecisionBySize = (size) => {
   if (precisionCache.has(size)) {
@@ -385,10 +334,6 @@ const getStepSize = async () => {
 const toPercentage = (number) => `${Math.round(number * 100)}%`;
 const calculateHours = (open, close) => (close - open) / CONFIG.HOUR_MS;
 
-// ============================================================================
-// BacktestEngine Class
-// ============================================================================
-
 class BacktestEngine {
   constructor(cachedKlineData, cachedRsiData, stepSize, strategyParams) {
     this.cachedKlineData = cachedKlineData;
@@ -401,7 +346,6 @@ class BacktestEngine {
     this.shouldLogResults = strategyParams.shouldLogResults || false;
     this.maxDrawdownThreshold = strategyParams.maxDrawdownThreshold || null;
 
-    // 状态变量
     this.fund = CONFIG.INITIAL_FUNDING;
     this.positionType = "NONE";
     this.positionAmt = null;
@@ -409,11 +353,9 @@ class BacktestEngine {
     this.openTimestamp = null;
     this.openPrice = null;
     this.liquidationPrice = null;
-    // Track price extremes during position for MAE/MFE
     this.positionMaxPrice = null;
     this.positionMinPrice = null;
 
-    // 统计数据
     this.totalTrades = 0;
     this.winningTrades = 0;
     this.losingTrades = 0;
@@ -421,16 +363,13 @@ class BacktestEngine {
     this.maxDrawdown = 0;
     this.peakFund = CONFIG.INITIAL_FUNDING;
     this.totalHoldTimeHours = 0;
-    this.tradeRecords = []; // 收集交易记录
+    this.tradeRecords = [];
 
-    // 预计算数据
     this.rsiLongData = cachedRsiData.get(this.rsiLongPeriod);
     this.rsiShortData = cachedRsiData.get(this.rsiShortPeriod);
-    // Start index should be max RSI period to ensure indicators are available
     this.startIndex = Math.max(this.rsiLongPeriod, this.rsiShortPeriod) + 1;
     this.dataLength = cachedKlineData.length;
 
-    // 预计算常量
     this.orderAmountPercent = CONFIG.ORDER_AMOUNT_PERCENT / 100;
     this.leverageReciprocal = 1 / this.leverage;
     this.liquidationMultiplier = 1 - this.leverageReciprocal;
@@ -438,7 +377,6 @@ class BacktestEngine {
   }
 
   getSignal(preRsiLong, preRsiShort) {
-    // Long-term RSI is used as entry filter, short-term RSI is used for exit
     if (this.positionType === "NONE" && preRsiLong > this.rsiLongLevel) {
       return "OPEN_LONG";
     }
@@ -470,7 +408,6 @@ class BacktestEngine {
     this.positionType = "LONG";
     this.openTimestamp = kline.openTime;
     this.liquidationPrice = this.openPrice * this.liquidationMultiplier;
-    // Initialize price tracking for MAE/MFE
     this.positionMaxPrice = kline.highPrice;
     this.positionMinPrice = kline.lowPrice;
   }
@@ -510,10 +447,6 @@ class BacktestEngine {
     const pnlPercent = pnl / this.positionFund;
     const holdHours = calculateHours(this.openTimestamp, closeTimestamp);
 
-    // Calculate MAE (Max Adverse Excursion) and MFE (Max Favorable Excursion)
-    // For LONG position:
-    // MAE = -(entryPrice - minPrice) / entryPrice (worst drawdown during position, negative)
-    // MFE = (maxPrice - entryPrice) / entryPrice (best unrealized profit)
     let mae = 0;
     let mfe = 0;
     let maeLeveraged = 0;
@@ -523,15 +456,12 @@ class BacktestEngine {
       this.positionMinPrice &&
       this.positionMaxPrice
     ) {
-      // MAE is negative (adverse movement)
       mae = -(this.openPrice - this.positionMinPrice) / this.openPrice;
       mfe = (this.positionMaxPrice - this.openPrice) / this.openPrice;
-      // Leveraged versions
       maeLeveraged = mae * this.leverage;
       mfeLeveraged = mfe * this.leverage;
     }
 
-    // 收集交易记录
     this.tradeRecords.push({
       finalFund,
       positionType: this.positionType,
@@ -604,7 +534,6 @@ class BacktestEngine {
     }
   }
 
-  // 回撤是否超過設定的最大閾值
   isDrawdownExceeded() {
     if (this.maxDrawdownThreshold === null) return false;
     return this.maxDrawdown > this.maxDrawdownThreshold;
@@ -617,7 +546,6 @@ class BacktestEngine {
     const closePrice = lastKline.closePrice;
     const closeTimestamp = lastKline.closeTime;
 
-    // Update price extremes before closing
     if (lastKline.highPrice > this.positionMaxPrice) {
       this.positionMaxPrice = lastKline.highPrice;
     }
@@ -664,12 +592,10 @@ class BacktestEngine {
       const preRsiLong = this.rsiLongData[i - 1];
       const preRsiShort = this.rsiShortData[i - 1];
 
-      // Skip if indicators are not yet available
       if (preRsiLong == null || preRsiShort == null) {
         continue;
       }
 
-      // Update price extremes during position for MAE/MFE
       if (this.positionType === "LONG") {
         if (curHighPrice > this.positionMaxPrice) {
           this.positionMaxPrice = curHighPrice;
@@ -697,7 +623,6 @@ class BacktestEngine {
         this.positionType === "LONG" ||
         this.peakFund > CONFIG.INITIAL_FUNDING
       ) {
-        // 先更新回撤，再根據設定檢查是否要提前終止
         this.updateDrawdown(curClosePrice);
         if (this.isDrawdownExceeded()) {
           return null;
@@ -762,7 +687,6 @@ const getBacktestResult = ({
   return engine.run();
 };
 
-// Calculate spot buy and hold strategy result (no leverage, no funding fee)
 const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
   if (!cachedKlineData || cachedKlineData.length === 0) {
     return null;
@@ -775,7 +699,6 @@ const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
   const sellPrice = lastKline.closePrice;
   const initialFund = CONFIG.INITIAL_FUNDING;
 
-  // Spot trading: use all funds, no leverage
   const orderAmountPercent = CONFIG.ORDER_AMOUNT_PERCENT / 100;
   const openPriceReciprocal = 1 / buyPrice;
   const orderQuantity = initialFund * orderAmountPercent * openPriceReciprocal;
@@ -783,7 +706,6 @@ const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
   const positionValue = positionAmt * buyPrice;
   const openFee = positionValue * CONFIG.FEE;
 
-  // Calculate close (spot trading, no funding fee)
   const closeFee = positionAmt * sellPrice * CONFIG.FEE;
   const pnl = (sellPrice - buyPrice) * positionAmt - closeFee;
   const finalFund = initialFund - positionValue - openFee + positionValue + pnl;
@@ -796,11 +718,9 @@ const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
   };
 };
 
-// Helper to increment numbers with decimals safely (keeps original behavior)
 const getAddedNumber = ({ number, addNumber, digit }) =>
   Number((number + addNumber).toFixed(digit));
 
-// getSettings / getRandomSettings: preserved original semantics
 const getSettings = () => {
   const settings = [];
   for (
@@ -891,7 +811,6 @@ const getBestResult = async () => {
     getStepSize()
   ]);
 
-  // Single-threaded loop over settings (keeps original behavior but with faster backtest)
   for (const setting of randomSettings) {
     const result = getBacktestResult({
       shouldLogResults: false,
@@ -902,7 +821,6 @@ const getBestResult = async () => {
       ...setting
     });
 
-    // 早期过滤已经在回测过程中完成，这里只需要检查结果是否有效
     if (result && result.totalReturn > bestResult.totalReturn) {
       bestResult = result;
     }
@@ -913,10 +831,6 @@ const getBestResult = async () => {
 
   return bestResult;
 };
-
-// ============================================================================
-// Main Entry Point
-// ============================================================================
 
 const startTime = Date.now();
 const bestResult = await getBestResult();
@@ -945,7 +859,6 @@ if (bestResult.fund > 0) {
     getStepSize()
   ]);
 
-  // Run detailed backtest to get trade records
   const detailedResult = getBacktestResult({
     shouldLogResults: true,
     cachedKlineData,
@@ -958,22 +871,18 @@ if (bestResult.fund > 0) {
     leverage
   });
 
-  // Calculate spot buy and hold strategy result
   const spotBuyAndHoldResult = getSpotBuyAndHoldResult(
     cachedKlineData,
     stepSize
   );
 
-  // 计算额外统计信息
   const tradeRecords = detailedResult.tradeRecords || [];
-  // Sort by pnlPercent for Best/Worst Trade
   const sortedByPnLPercent = [...tradeRecords].sort(
     (a, b) => b.pnlPercent - a.pnlPercent
   );
   const bestTrade = sortedByPnLPercent[0];
   const worstTrade = sortedByPnLPercent[sortedByPnLPercent.length - 1];
 
-  // Calculate additional metrics
   const totalProfit =
     winningTrades > 0
       ? tradeRecords.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0)
@@ -989,7 +898,6 @@ if (bestResult.fund > 0) {
   const profitFactor =
     totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
 
-  // Calculate average MAE and MFE
   let avgMAE = 0;
   let avgMFE = 0;
   let avgMAELeveraged = 0;
@@ -1011,7 +919,6 @@ if (bestResult.fund > 0) {
     avgMFELeveraged = totalMFELeveraged / tradeRecords.length;
   }
 
-  // Calculate backtest time range
   const firstKline = cachedKlineData[0];
   const lastKline = cachedKlineData[cachedKlineData.length - 1];
   const backtestStartTime = firstKline.openTime;
@@ -1021,7 +928,6 @@ if (bestResult.fund > 0) {
   const annualizedReturn =
     backtestDays > 0 ? Math.pow(1 + totalReturn, 365 / backtestDays) - 1 : 0;
 
-  // Calculate additional risk-adjusted metrics
   const calmarRatio =
     maxDrawdown > 0
       ? annualizedReturn / maxDrawdown
@@ -1029,31 +935,23 @@ if (bestResult.fund > 0) {
       ? Infinity
       : 0;
 
-  // Calculate Sharpe Ratio and Sortino Ratio
-  // Need to calculate periodic returns for Sharpe/Sortino
   let periodicReturns = [];
   let previousFund = CONFIG.INITIAL_FUNDING;
 
-  // Calculate exposure (time in position / total time)
   let totalPositionTime = 0;
   let totalBacktestTime = backtestEndTime - backtestStartTime;
 
-  // Build fund curve and calculate exposure
   for (const trade of tradeRecords) {
-    // Calculate return for this period
     const periodReturn = (trade.finalFund - previousFund) / previousFund;
     periodicReturns.push(periodReturn);
     previousFund = trade.finalFund;
 
-    // Add position holding time
     totalPositionTime += trade.closeTimestamp - trade.openTimestamp;
   }
 
-  // Calculate exposure percentage
   const exposure =
     totalBacktestTime > 0 ? (totalPositionTime / totalBacktestTime) * 100 : 0;
 
-  // Calculate Sharpe Ratio (annualized)
   let sharpeRatio = 0;
   if (periodicReturns.length > 1) {
     const meanReturn =
@@ -1064,7 +962,6 @@ if (bestResult.fund > 0) {
     const stdDev = Math.sqrt(variance);
 
     if (stdDev > 0 && backtestDays > 0) {
-      // Annualize: multiply by sqrt(trades per year)
       const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
       const annualizedStdDev = stdDev * Math.sqrt(tradesPerYear);
       const annualizedMeanReturn = meanReturn * tradesPerYear;
@@ -1072,7 +969,6 @@ if (bestResult.fund > 0) {
     }
   }
 
-  // Calculate Sortino Ratio (only downside deviation)
   let sortinoRatio = 0;
   if (periodicReturns.length > 1) {
     const meanReturn =
@@ -1093,12 +989,10 @@ if (bestResult.fund > 0) {
     }
   }
 
-  // Output optimized results
   console.log("\n" + "=".repeat(60));
   console.log("Backtest Results Summary");
   console.log("=".repeat(60));
 
-  // Core Performance
   console.log("\nCore Performance");
   console.log(`  Final Fund:       ${fund.toFixed(2)}`);
   console.log(
@@ -1114,7 +1008,6 @@ if (bestResult.fund > 0) {
     );
   }
 
-  // Spot Buy and Hold Comparison (simplified)
   if (spotBuyAndHoldResult) {
     const returnDiff = totalReturn - spotBuyAndHoldResult.totalReturn;
     const returnDiffPercent = returnDiff * 100;
@@ -1136,7 +1029,6 @@ if (bestResult.fund > 0) {
   console.log(`  RSI Short Level:  ${rsiShortLevel}`);
   console.log(`  Leverage:         ${leverage}x`);
 
-  // Risk Metrics
   console.log("\nRisk Metrics");
   console.log(`  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%`);
   if (calmarRatio !== Infinity && calmarRatio > 0) {
@@ -1151,7 +1043,6 @@ if (bestResult.fund > 0) {
     console.log(`  Sortino Ratio:    ${sortinoRatio.toFixed(2)}`);
   }
 
-  // Trading Statistics
   console.log("\nTrading Statistics");
   console.log(`  Total Trades:     ${totalTrades}`);
   console.log(`  Win Rate:         ${(winRate * 100).toFixed(2)}%`);
@@ -1175,15 +1066,6 @@ if (bestResult.fund > 0) {
     );
   }
 
-  // Strategy Parameters
-  console.log("\nStrategy Parameters");
-  console.log(`  RSI Long Period:  ${rsiLongPeriod}`);
-  console.log(`  RSI Short Period: ${rsiShortPeriod}`);
-  console.log(`  RSI Long Level:   ${rsiLongLevel}`);
-  console.log(`  RSI Short Level:  ${rsiShortLevel}`);
-  console.log(`  Leverage:         ${leverage}x`);
-
-  // Backtest Period
   console.log("\nBacktest Period");
   console.log(`  Duration:         ${backtestDays.toFixed(2)} days`);
   console.log(
@@ -1192,7 +1074,6 @@ if (bestResult.fund > 0) {
     )}`
   );
 
-  // Best/Worst Trade (full details)
   if (bestTrade) {
     console.log("\nBest Trade");
     const bestColor = "\x1b[32m";
