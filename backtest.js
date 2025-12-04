@@ -23,11 +23,13 @@ const CONFIG = {
   INITIAL_FUNDING: 100,
   FEE: 0.0005, // 0.05%
   FUNDING_RATE: 0.0001, // 0.01%
-  RSI_PERIOD_SETTING: { min: 1, max: 100, step: 1 },
+  // Use different RSI period ranges for long-term (entry) and short-term (exit) signals
+  RSI_LONG_PERIOD_SETTING: { min: 1, max: 100, step: 1 },
+  RSI_SHORT_PERIOD_SETTING: { min: 1, max: 100, step: 1 },
   RSI_LONG_LEVEL_SETTING: { min: 50, max: 100, step: 5 },
   RSI_SHORT_LEVEL_SETTING: { min: 5, max: 50, step: 5 },
-  LEVERAGE_SETTING: { min: 1, max: 15, step: 1 },
-  RANDOM_SAMPLE_NUMBER: null, // number or null
+  LEVERAGE_SETTING: { min: 1, max: 10, step: 1 },
+  RANDOM_SAMPLE_NUMBER: 100000, // number or null
   KLINE_START_TIME: getTimestampYearsAgo(10), // timestamp or null
   IS_KLINE_START_TIME_TO_NOW: true,
   HOUR_MS: 1000 * 60 * 60,
@@ -301,14 +303,22 @@ const getRsiCache = async () => {
   if (shouldRefreshRsiCache()) {
     const values = await getClosePricesCache();
 
-    const periods = [];
+    const periodSet = new Set();
     for (
-      let period = CONFIG.RSI_PERIOD_SETTING.min;
-      period <= CONFIG.RSI_PERIOD_SETTING.max;
-      period += CONFIG.RSI_PERIOD_SETTING.step
+      let period = CONFIG.RSI_LONG_PERIOD_SETTING.min;
+      period <= CONFIG.RSI_LONG_PERIOD_SETTING.max;
+      period += CONFIG.RSI_LONG_PERIOD_SETTING.step
     ) {
-      periods.push(period);
+      periodSet.add(period);
     }
+    for (
+      let period = CONFIG.RSI_SHORT_PERIOD_SETTING.min;
+      period <= CONFIG.RSI_SHORT_PERIOD_SETTING.max;
+      period += CONFIG.RSI_SHORT_PERIOD_SETTING.step
+    ) {
+      periodSet.add(period);
+    }
+    const periods = Array.from(periodSet);
 
     const results = computeRSI(values, periods);
     for (const period of periods) rsiCache.set(period, results[period]);
@@ -373,9 +383,9 @@ const calculateHours = (open, close) => (close - open) / CONFIG.HOUR_MS;
 class BacktestEngine {
   constructor(cachedKlineData, cachedRsiData, stepSize, strategyParams) {
     this.cachedKlineData = cachedKlineData;
-    this.cachedRsiData = cachedRsiData;
     this.stepSize = stepSize;
-    this.rsiPeriod = strategyParams.rsiPeriod;
+    this.rsiLongPeriod = strategyParams.rsiLongPeriod;
+    this.rsiShortPeriod = strategyParams.rsiShortPeriod;
     this.rsiLongLevel = strategyParams.rsiLongLevel;
     this.rsiShortLevel = strategyParams.rsiShortLevel;
     this.leverage = strategyParams.leverage;
@@ -402,9 +412,10 @@ class BacktestEngine {
     this.tradeRecords = []; // 收集交易记录
 
     // 预计算数据
-    this.rsiData = cachedRsiData.get(this.rsiPeriod);
-    // Start index should be RSI period to ensure indicator is available
-    this.startIndex = CONFIG.RSI_PERIOD_SETTING.max + 1;
+    this.rsiLongData = cachedRsiData.get(this.rsiLongPeriod);
+    this.rsiShortData = cachedRsiData.get(this.rsiShortPeriod);
+    // Start index should be max RSI period to ensure indicators are available
+    this.startIndex = Math.max(this.rsiLongPeriod, this.rsiShortPeriod) + 1;
     this.dataLength = cachedKlineData.length;
 
     // 预计算常量
@@ -414,11 +425,12 @@ class BacktestEngine {
     this.hourMsReciprocal = 1 / CONFIG.HOUR_MS;
   }
 
-  getSignal(preRsi) {
-    if (this.positionType === "NONE" && preRsi > this.rsiLongLevel) {
+  getSignal(preRsiLong, preRsiShort) {
+    // Long-term RSI is used as entry filter, short-term RSI is used for exit
+    if (this.positionType === "NONE" && preRsiLong > this.rsiLongLevel) {
       return "OPEN_LONG";
     }
-    if (this.positionType === "LONG" && preRsi < this.rsiShortLevel) {
+    if (this.positionType === "LONG" && preRsiShort < this.rsiShortLevel) {
       return "CLOSE_LONG";
     }
     return "NONE";
@@ -576,16 +588,28 @@ class BacktestEngine {
   }
 
   run() {
-    if (!this.rsiData || this.rsiData.length === 0) return null;
+    if (
+      !this.rsiLongData ||
+      this.rsiLongData.length === 0 ||
+      !this.rsiShortData ||
+      this.rsiShortData.length === 0
+    )
+      return null;
 
     for (let i = this.startIndex; i < this.dataLength; i++) {
       const curKline = this.cachedKlineData[i];
       const curClosePrice = curKline.closePrice;
       const curLowPrice = curKline.lowPrice;
 
-      const preRsi = this.rsiData[i - 1];
+      const preRsiLong = this.rsiLongData[i - 1];
+      const preRsiShort = this.rsiShortData[i - 1];
 
-      const signal = this.getSignal(preRsi);
+      // Skip if indicators are not yet available
+      if (preRsiLong == null || preRsiShort == null) {
+        continue;
+      }
+
+      const signal = this.getSignal(preRsiLong, preRsiShort);
 
       if (signal === "OPEN_LONG") {
         this.openLongPosition(curKline);
@@ -624,7 +648,8 @@ class BacktestEngine {
     return {
       currentPositionType: this.positionType,
       fund: this.fund,
-      rsiPeriod: this.rsiPeriod,
+      rsiLongPeriod: this.rsiLongPeriod,
+      rsiShortPeriod: this.rsiShortPeriod,
       rsiLongLevel: this.rsiLongLevel,
       rsiShortLevel: this.rsiShortLevel,
       leverage: this.leverage,
@@ -648,14 +673,16 @@ const getBacktestResult = ({
   cachedKlineData,
   cachedRsiData,
   stepSize,
-  rsiPeriod,
+  rsiLongPeriod,
+  rsiShortPeriod,
   rsiLongLevel,
   rsiShortLevel,
   leverage,
   maxDrawdownThreshold = null
 }) => {
   const engine = new BacktestEngine(cachedKlineData, cachedRsiData, stepSize, {
-    rsiPeriod,
+    rsiLongPeriod,
+    rsiShortPeriod,
     rsiLongLevel,
     rsiShortLevel,
     leverage,
@@ -682,38 +709,49 @@ const getSettings = () => {
     })
   ) {
     for (
-      let rsiPeriod = CONFIG.RSI_PERIOD_SETTING.min;
-      rsiPeriod <= CONFIG.RSI_PERIOD_SETTING.max;
-      rsiPeriod = getAddedNumber({
-        number: rsiPeriod,
-        addNumber: CONFIG.RSI_PERIOD_SETTING.step,
+      let rsiLongPeriod = CONFIG.RSI_LONG_PERIOD_SETTING.min;
+      rsiLongPeriod <= CONFIG.RSI_LONG_PERIOD_SETTING.max;
+      rsiLongPeriod = getAddedNumber({
+        number: rsiLongPeriod,
+        addNumber: CONFIG.RSI_LONG_PERIOD_SETTING.step,
         digit: 0
       })
     ) {
       for (
-        let rsiLongLevel = CONFIG.RSI_LONG_LEVEL_SETTING.min;
-        rsiLongLevel <= CONFIG.RSI_LONG_LEVEL_SETTING.max;
-        rsiLongLevel = getAddedNumber({
-          number: rsiLongLevel,
-          addNumber: CONFIG.RSI_LONG_LEVEL_SETTING.step,
+        let rsiShortPeriod = CONFIG.RSI_SHORT_PERIOD_SETTING.min;
+        rsiShortPeriod <= CONFIG.RSI_SHORT_PERIOD_SETTING.max;
+        rsiShortPeriod = getAddedNumber({
+          number: rsiShortPeriod,
+          addNumber: CONFIG.RSI_SHORT_PERIOD_SETTING.step,
           digit: 0
         })
       ) {
         for (
-          let rsiShortLevel = CONFIG.RSI_SHORT_LEVEL_SETTING.min;
-          rsiShortLevel <= CONFIG.RSI_SHORT_LEVEL_SETTING.max;
-          rsiShortLevel = getAddedNumber({
-            number: rsiShortLevel,
-            addNumber: CONFIG.RSI_SHORT_LEVEL_SETTING.step,
+          let rsiLongLevel = CONFIG.RSI_LONG_LEVEL_SETTING.min;
+          rsiLongLevel <= CONFIG.RSI_LONG_LEVEL_SETTING.max;
+          rsiLongLevel = getAddedNumber({
+            number: rsiLongLevel,
+            addNumber: CONFIG.RSI_LONG_LEVEL_SETTING.step,
             digit: 0
           })
         ) {
-          settings.push({
-            rsiPeriod,
-            rsiLongLevel,
-            rsiShortLevel,
-            leverage
-          });
+          for (
+            let rsiShortLevel = CONFIG.RSI_SHORT_LEVEL_SETTING.min;
+            rsiShortLevel <= CONFIG.RSI_SHORT_LEVEL_SETTING.max;
+            rsiShortLevel = getAddedNumber({
+              number: rsiShortLevel,
+              addNumber: CONFIG.RSI_SHORT_LEVEL_SETTING.step,
+              digit: 0
+            })
+          ) {
+            settings.push({
+              rsiLongPeriod,
+              rsiShortPeriod,
+              rsiLongLevel,
+              rsiShortLevel,
+              leverage
+            });
+          }
         }
       }
     }
@@ -782,7 +820,8 @@ if (bestResult.fund > 0) {
   const {
     currentPositionType,
     fund,
-    rsiPeriod,
+    rsiLongPeriod,
+    rsiShortPeriod,
     rsiLongLevel,
     rsiShortLevel,
     leverage,
@@ -808,7 +847,8 @@ if (bestResult.fund > 0) {
     cachedKlineData,
     cachedRsiData,
     stepSize,
-    rsiPeriod,
+    rsiLongPeriod,
+    rsiShortPeriod,
     rsiLongLevel,
     rsiShortLevel,
     leverage
@@ -850,7 +890,8 @@ if (bestResult.fund > 0) {
   );
 
   console.log("\nStrategy Parameters");
-  console.log(`  RSI Period:       ${rsiPeriod}`);
+  console.log(`  RSI Long Period:  ${rsiLongPeriod}`);
+  console.log(`  RSI Short Period: ${rsiShortPeriod}`);
   console.log(`  RSI Long Level:   ${rsiLongLevel}`);
   console.log(`  RSI Short Level:  ${rsiShortLevel}`);
   console.log(`  Leverage:         ${leverage}x`);
