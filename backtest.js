@@ -341,6 +341,15 @@ const getReadableTime = (timestamp) => {
   )}`;
 };
 
+// Short date format for trade history
+const getShortDate = (timestamp) => {
+  const date = new Date(timestamp);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+    date.getDate()
+  )}`;
+};
+
 // Helper functions - Cache precision calculations
 const precisionCache = new Map();
 const getPrecisionBySize = (size) => {
@@ -400,6 +409,9 @@ class BacktestEngine {
     this.openTimestamp = null;
     this.openPrice = null;
     this.liquidationPrice = null;
+    // Track price extremes during position for MAE/MFE
+    this.positionMaxPrice = null;
+    this.positionMinPrice = null;
 
     // 统计数据
     this.totalTrades = 0;
@@ -458,6 +470,9 @@ class BacktestEngine {
     this.positionType = "LONG";
     this.openTimestamp = kline.openTime;
     this.liquidationPrice = this.openPrice * this.liquidationMultiplier;
+    // Initialize price tracking for MAE/MFE
+    this.positionMaxPrice = kline.highPrice;
+    this.positionMinPrice = kline.lowPrice;
   }
 
   closeLongPosition(kline) {
@@ -495,6 +510,27 @@ class BacktestEngine {
     const pnlPercent = pnl / this.positionFund;
     const holdHours = calculateHours(this.openTimestamp, closeTimestamp);
 
+    // Calculate MAE (Max Adverse Excursion) and MFE (Max Favorable Excursion)
+    // For LONG position:
+    // MAE = -(entryPrice - minPrice) / entryPrice (worst drawdown during position, negative)
+    // MFE = (maxPrice - entryPrice) / entryPrice (best unrealized profit)
+    let mae = 0;
+    let mfe = 0;
+    let maeLeveraged = 0;
+    let mfeLeveraged = 0;
+    if (
+      this.positionType === "LONG" &&
+      this.positionMinPrice &&
+      this.positionMaxPrice
+    ) {
+      // MAE is negative (adverse movement)
+      mae = -(this.openPrice - this.positionMinPrice) / this.openPrice;
+      mfe = (this.positionMaxPrice - this.openPrice) / this.openPrice;
+      // Leveraged versions
+      maeLeveraged = mae * this.leverage;
+      mfeLeveraged = mfe * this.leverage;
+    }
+
     // 收集交易记录
     this.tradeRecords.push({
       finalFund,
@@ -505,7 +541,11 @@ class BacktestEngine {
       pnlPercent,
       openTimestamp: this.openTimestamp,
       closeTimestamp,
-      holdHours
+      holdHours,
+      mae,
+      mfe,
+      maeLeveraged,
+      mfeLeveraged
     });
   }
 
@@ -528,6 +568,8 @@ class BacktestEngine {
     this.openTimestamp = null;
     this.openPrice = null;
     this.liquidationPrice = null;
+    this.positionMaxPrice = null;
+    this.positionMinPrice = null;
   }
 
   checkLiquidation(curLowPrice) {
@@ -574,6 +616,15 @@ class BacktestEngine {
     const lastKline = this.cachedKlineData[this.dataLength - 1];
     const closePrice = lastKline.closePrice;
     const closeTimestamp = lastKline.closeTime;
+
+    // Update price extremes before closing
+    if (lastKline.highPrice > this.positionMaxPrice) {
+      this.positionMaxPrice = lastKline.highPrice;
+    }
+    if (lastKline.lowPrice < this.positionMinPrice) {
+      this.positionMinPrice = lastKline.lowPrice;
+    }
+
     const fee = this.positionAmt * closePrice * CONFIG.FEE;
     const fundingFee = this.calculateFundingFeeForClose(
       closePrice,
@@ -581,6 +632,14 @@ class BacktestEngine {
     );
     const pnl =
       (closePrice - this.openPrice) * this.positionAmt - fee - fundingFee;
+
+    if (this.shouldLogResults) {
+      this.logTradeResult({
+        closePrice,
+        closeTimestamp,
+        pnl
+      });
+    }
 
     this.fund += this.positionFund + pnl;
     this.updateTradeStats(pnl, closeTimestamp);
@@ -600,6 +659,7 @@ class BacktestEngine {
       const curKline = this.cachedKlineData[i];
       const curClosePrice = curKline.closePrice;
       const curLowPrice = curKline.lowPrice;
+      const curHighPrice = curKline.highPrice;
 
       const preRsiLong = this.rsiLongData[i - 1];
       const preRsiShort = this.rsiShortData[i - 1];
@@ -607,6 +667,16 @@ class BacktestEngine {
       // Skip if indicators are not yet available
       if (preRsiLong == null || preRsiShort == null) {
         continue;
+      }
+
+      // Update price extremes during position for MAE/MFE
+      if (this.positionType === "LONG") {
+        if (curHighPrice > this.positionMaxPrice) {
+          this.positionMaxPrice = curHighPrice;
+        }
+        if (curLowPrice < this.positionMinPrice) {
+          this.positionMinPrice = curLowPrice;
+        }
       }
 
       const signal = this.getSignal(preRsiLong, preRsiShort);
@@ -896,21 +966,12 @@ if (bestResult.fund > 0) {
 
   // 计算额外统计信息
   const tradeRecords = detailedResult.tradeRecords || [];
-  const sortedByPnL = [...tradeRecords].sort((a, b) => b.pnl - a.pnl);
-  const bestTrade = sortedByPnL[0];
-  const worstTrade = sortedByPnL[sortedByPnL.length - 1];
-  const avgWin =
-    winningTrades > 0
-      ? tradeRecords
-          .filter((t) => t.pnl > 0)
-          .reduce((sum, t) => sum + t.pnl, 0) / winningTrades
-      : 0;
-  const avgLoss =
-    losingTrades > 0
-      ? tradeRecords
-          .filter((t) => t.pnl < 0)
-          .reduce((sum, t) => sum + t.pnl, 0) / losingTrades
-      : 0;
+  // Sort by pnlPercent for Best/Worst Trade
+  const sortedByPnLPercent = [...tradeRecords].sort(
+    (a, b) => b.pnlPercent - a.pnlPercent
+  );
+  const bestTrade = sortedByPnLPercent[0];
+  const worstTrade = sortedByPnLPercent[sortedByPnLPercent.length - 1];
 
   // Calculate additional metrics
   const totalProfit =
@@ -927,8 +988,28 @@ if (bestResult.fund > 0) {
       : 0;
   const profitFactor =
     totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
-  const avgWinLossRatio =
-    avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : avgWin > 0 ? Infinity : 0;
+
+  // Calculate average MAE and MFE
+  let avgMAE = 0;
+  let avgMFE = 0;
+  let avgMAELeveraged = 0;
+  let avgMFELeveraged = 0;
+  if (tradeRecords.length > 0) {
+    const totalMAE = tradeRecords.reduce((sum, t) => sum + t.mae, 0);
+    const totalMFE = tradeRecords.reduce((sum, t) => sum + t.mfe, 0);
+    const totalMAELeveraged = tradeRecords.reduce(
+      (sum, t) => sum + t.maeLeveraged,
+      0
+    );
+    const totalMFELeveraged = tradeRecords.reduce(
+      (sum, t) => sum + t.mfeLeveraged,
+      0
+    );
+    avgMAE = totalMAE / tradeRecords.length;
+    avgMFE = totalMFE / tradeRecords.length;
+    avgMAELeveraged = totalMAELeveraged / tradeRecords.length;
+    avgMFELeveraged = totalMFELeveraged / tradeRecords.length;
+  }
 
   // Calculate backtest time range
   const firstKline = cachedKlineData[0];
@@ -940,23 +1021,75 @@ if (bestResult.fund > 0) {
   const annualizedReturn =
     backtestDays > 0 ? Math.pow(1 + totalReturn, 365 / backtestDays) - 1 : 0;
 
-  // Calculate max consecutive wins/losses
-  let maxConsecutiveWins = 0;
-  let maxConsecutiveLosses = 0;
-  let currentConsecutiveWins = 0;
-  let currentConsecutiveLosses = 0;
+  // Calculate additional risk-adjusted metrics
+  const calmarRatio =
+    maxDrawdown > 0
+      ? annualizedReturn / maxDrawdown
+      : annualizedReturn > 0
+      ? Infinity
+      : 0;
+
+  // Calculate Sharpe Ratio and Sortino Ratio
+  // Need to calculate periodic returns for Sharpe/Sortino
+  let periodicReturns = [];
+  let previousFund = CONFIG.INITIAL_FUNDING;
+
+  // Calculate exposure (time in position / total time)
+  let totalPositionTime = 0;
+  let totalBacktestTime = backtestEndTime - backtestStartTime;
+
+  // Build fund curve and calculate exposure
   for (const trade of tradeRecords) {
-    if (trade.pnl > 0) {
-      currentConsecutiveWins++;
-      currentConsecutiveLosses = 0;
-      maxConsecutiveWins = Math.max(maxConsecutiveWins, currentConsecutiveWins);
-    } else if (trade.pnl < 0) {
-      currentConsecutiveLosses++;
-      currentConsecutiveWins = 0;
-      maxConsecutiveLosses = Math.max(
-        maxConsecutiveLosses,
-        currentConsecutiveLosses
-      );
+    // Calculate return for this period
+    const periodReturn = (trade.finalFund - previousFund) / previousFund;
+    periodicReturns.push(periodReturn);
+    previousFund = trade.finalFund;
+
+    // Add position holding time
+    totalPositionTime += trade.closeTimestamp - trade.openTimestamp;
+  }
+
+  // Calculate exposure percentage
+  const exposure =
+    totalBacktestTime > 0 ? (totalPositionTime / totalBacktestTime) * 100 : 0;
+
+  // Calculate Sharpe Ratio (annualized)
+  let sharpeRatio = 0;
+  if (periodicReturns.length > 1) {
+    const meanReturn =
+      periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
+    const variance =
+      periodicReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) /
+      (periodicReturns.length - 1);
+    const stdDev = Math.sqrt(variance);
+
+    if (stdDev > 0 && backtestDays > 0) {
+      // Annualize: multiply by sqrt(trades per year)
+      const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
+      const annualizedStdDev = stdDev * Math.sqrt(tradesPerYear);
+      const annualizedMeanReturn = meanReturn * tradesPerYear;
+      sharpeRatio = annualizedMeanReturn / annualizedStdDev;
+    }
+  }
+
+  // Calculate Sortino Ratio (only downside deviation)
+  let sortinoRatio = 0;
+  if (periodicReturns.length > 1) {
+    const meanReturn =
+      periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
+    const downsideReturns = periodicReturns.filter((r) => r < 0);
+    if (downsideReturns.length > 0) {
+      const downsideVariance =
+        downsideReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) /
+        downsideReturns.length;
+      const downsideStdDev = Math.sqrt(downsideVariance);
+
+      if (downsideStdDev > 0 && backtestDays > 0) {
+        const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
+        const annualizedStdDev = downsideStdDev * Math.sqrt(tradesPerYear);
+        const annualizedMeanReturn = meanReturn * tradesPerYear;
+        sortinoRatio = annualizedMeanReturn / annualizedStdDev;
+      }
     }
   }
 
@@ -965,19 +1098,23 @@ if (bestResult.fund > 0) {
   console.log("Backtest Results Summary");
   console.log("=".repeat(60));
 
-  console.log("\nFund Performance");
-  console.log(`  Initial Fund:     ${CONFIG.INITIAL_FUNDING.toFixed(2)}`);
+  // Core Performance
+  console.log("\nCore Performance");
   console.log(`  Final Fund:       ${fund.toFixed(2)}`);
-  console.log(
-    `  Total PnL:        ${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}`
-  );
   console.log(
     `  Total Return:     ${totalReturn > 0 ? "+" : ""}${(
       totalReturn * 100
     ).toFixed(2)}%`
   );
+  if (backtestDays > 0) {
+    console.log(
+      `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
+        annualizedReturn * 100
+      ).toFixed(2)}%`
+    );
+  }
 
-  // Spot Buy and Hold Comparison
+  // Spot Buy and Hold Comparison (simplified)
   if (spotBuyAndHoldResult) {
     const returnDiff = totalReturn - spotBuyAndHoldResult.totalReturn;
     const returnDiffPercent = returnDiff * 100;
@@ -985,14 +1122,8 @@ if (bestResult.fund > 0) {
     const outperformanceColor = returnDiff >= 0 ? "\x1b[32m" : "\x1b[31m";
     const resetColor = "\x1b[0m";
 
-    console.log("\nSpot Buy and Hold Comparison");
     console.log(
-      `  Spot Holder Return: ${
-        spotBuyAndHoldResult.totalReturn > 0 ? "+" : ""
-      }${(spotBuyAndHoldResult.totalReturn * 100).toFixed(2)}%`
-    );
-    console.log(
-      `  ${outperformanceColor}Strategy ${outperformance} Spot Holder by ${Math.abs(
+      `  ${outperformanceColor}vs Spot Holder: ${outperformance} by ${Math.abs(
         returnDiffPercent
       ).toFixed(2)}%${resetColor}`
     );
@@ -1005,119 +1136,123 @@ if (bestResult.fund > 0) {
   console.log(`  RSI Short Level:  ${rsiShortLevel}`);
   console.log(`  Leverage:         ${leverage}x`);
 
+  // Risk Metrics
+  console.log("\nRisk Metrics");
+  console.log(`  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%`);
+  if (calmarRatio !== Infinity && calmarRatio > 0) {
+    console.log(`  Calmar Ratio:     ${calmarRatio.toFixed(2)}`);
+  } else if (calmarRatio === Infinity) {
+    console.log(`  Calmar Ratio:     ∞ (No drawdown)`);
+  }
+  if (sharpeRatio !== 0) {
+    console.log(`  Sharpe Ratio:     ${sharpeRatio.toFixed(2)}`);
+  }
+  if (sortinoRatio !== 0) {
+    console.log(`  Sortino Ratio:    ${sortinoRatio.toFixed(2)}`);
+  }
+
+  // Trading Statistics
   console.log("\nTrading Statistics");
   console.log(`  Total Trades:     ${totalTrades}`);
-  console.log(
-    `  Winning Trades:   ${winningTrades} (${(winRate * 100).toFixed(2)}%)`
-  );
-  console.log(
-    `  Losing Trades:    ${losingTrades} (${((1 - winRate) * 100).toFixed(2)}%)`
-  );
-  console.log(`  Avg Hold Time:    ${averageHoldTimeHours.toFixed(2)} hours`);
-  if (winningTrades > 0) {
-    console.log(`  Avg Win:          ${avgWin.toFixed(2)}`);
-  }
-  if (losingTrades > 0) {
-    console.log(`  Avg Loss:         ${avgLoss.toFixed(2)}`);
-  }
+  console.log(`  Win Rate:         ${(winRate * 100).toFixed(2)}%`);
   if (profitFactor !== Infinity && profitFactor > 0) {
     console.log(`  Profit Factor:    ${profitFactor.toFixed(2)}`);
   } else if (profitFactor === Infinity) {
     console.log(`  Profit Factor:    ∞ (No losses)`);
   }
-  if (avgWinLossRatio !== Infinity && avgWinLossRatio > 0) {
-    console.log(`  Avg Win/Loss:     ${avgWinLossRatio.toFixed(2)}`);
-  } else if (avgWinLossRatio === Infinity) {
-    console.log(`  Avg Win/Loss:     ∞ (No losses)`);
-  }
-  if (totalTrades > 0) {
-    console.log(`  Max Consecutive Wins:  ${maxConsecutiveWins}`);
-    console.log(`  Max Consecutive Losses: ${maxConsecutiveLosses}`);
-  }
-
-  console.log("\nRisk Metrics");
-  console.log(`  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%`);
-  if (backtestDays > 0) {
+  console.log(`  Avg Hold Time:    ${averageHoldTimeHours.toFixed(2)} hours`);
+  console.log(`  Exposure:         ${exposure.toFixed(2)}%`);
+  if (tradeRecords.length > 0) {
     console.log(
-      `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
-        annualizedReturn * 100
-      ).toFixed(2)}%`
+      `  Avg MAE:          ${(avgMAE * 100).toFixed(2)}% (${(
+        avgMAELeveraged * 100
+      ).toFixed(2)}% lev)`
+    );
+    console.log(
+      `  Avg MFE:          ${(avgMFE * 100).toFixed(2)}% (${(
+        avgMFELeveraged * 100
+      ).toFixed(2)}% lev)`
     );
   }
 
-  console.log("\nBacktest Period");
-  console.log(`  Start Time:       ${getReadableTime(backtestStartTime)}`);
-  console.log(`  End Time:         ${getReadableTime(backtestEndTime)}`);
-  console.log(`  Duration:         ${backtestDays.toFixed(2)} days`);
+  // Strategy Parameters
+  console.log("\nStrategy Parameters");
+  console.log(`  RSI Long Period:  ${rsiLongPeriod}`);
+  console.log(`  RSI Short Period: ${rsiShortPeriod}`);
+  console.log(`  RSI Long Level:   ${rsiLongLevel}`);
+  console.log(`  RSI Short Level:  ${rsiShortLevel}`);
+  console.log(`  Leverage:         ${leverage}x`);
 
+  // Backtest Period
+  console.log("\nBacktest Period");
+  console.log(`  Duration:         ${backtestDays.toFixed(2)} days`);
+  console.log(
+    `  ${getReadableTime(backtestStartTime)} ~ ${getReadableTime(
+      backtestEndTime
+    )}`
+  );
+
+  // Best/Worst Trade (full details)
   if (bestTrade) {
     console.log("\nBest Trade");
     const bestColor = "\x1b[32m";
     const resetColor = "\x1b[0m";
+    const pnlSign = bestTrade.pnl > 0 ? "+" : "";
     console.log(
-      `  ${bestColor}Profit: ${bestTrade.pnl.toFixed(2)} (${toPercentage(
+      `  ${bestColor}Return: ${pnlSign}${toPercentage(
         bestTrade.pnlPercent
-      )})${resetColor}`
+      )}${resetColor}`
+    );
+    console.log(`  PnL:              ${pnlSign}${bestTrade.pnl.toFixed(2)}`);
+    console.log(`  Entry Price:      ${bestTrade.openPrice.toFixed(2)}`);
+    console.log(`  Exit Price:       ${bestTrade.closePrice.toFixed(2)}`);
+    console.log(
+      `  Time:             ${getReadableTime(
+        bestTrade.openTimestamp
+      )} ~ ${getReadableTime(bestTrade.closeTimestamp)}`
+    );
+    console.log(`  Hold Time:        ${bestTrade.holdHours.toFixed(2)} hours`);
+    console.log(
+      `  MAE:              ${(bestTrade.mae * 100).toFixed(2)}% (${(
+        bestTrade.maeLeveraged * 100
+      ).toFixed(2)}% lev)`
     );
     console.log(
-      `  Price: ${bestTrade.openPrice.toFixed(
-        2
-      )} -> ${bestTrade.closePrice.toFixed(2)}`
+      `  MFE:              ${(bestTrade.mfe * 100).toFixed(2)}% (${(
+        bestTrade.mfeLeveraged * 100
+      ).toFixed(2)}% lev)`
     );
-    console.log(
-      `  Time: ${getReadableTime(bestTrade.openTimestamp)} ~ ${getReadableTime(
-        bestTrade.closeTimestamp
-      )}`
-    );
-    console.log(`  Hold: ${bestTrade.holdHours.toFixed(2)} hours`);
   }
 
   if (worstTrade) {
     console.log("\nWorst Trade");
     const worstColor = "\x1b[31m";
     const resetColor = "\x1b[0m";
+    const pnlSign = worstTrade.pnl > 0 ? "+" : "";
     console.log(
-      `  ${worstColor}Loss: ${worstTrade.pnl.toFixed(2)} (${toPercentage(
+      `  ${worstColor}Return: ${pnlSign}${toPercentage(
         worstTrade.pnlPercent
-      )})${resetColor}`
+      )}${resetColor}`
+    );
+    console.log(`  PnL:              ${pnlSign}${worstTrade.pnl.toFixed(2)}`);
+    console.log(`  Entry Price:      ${worstTrade.openPrice.toFixed(2)}`);
+    console.log(`  Exit Price:       ${worstTrade.closePrice.toFixed(2)}`);
+    console.log(
+      `  Time:             ${getReadableTime(
+        worstTrade.openTimestamp
+      )} ~ ${getReadableTime(worstTrade.closeTimestamp)}`
+    );
+    console.log(`  Hold Time:        ${worstTrade.holdHours.toFixed(2)} hours`);
+    console.log(
+      `  MAE:              ${(worstTrade.mae * 100).toFixed(2)}% (${(
+        worstTrade.maeLeveraged * 100
+      ).toFixed(2)}% lev)`
     );
     console.log(
-      `  Price: ${worstTrade.openPrice.toFixed(
-        2
-      )} -> ${worstTrade.closePrice.toFixed(2)}`
+      `  MFE:              ${(worstTrade.mfe * 100).toFixed(2)}% (${(
+        worstTrade.mfeLeveraged * 100
+      ).toFixed(2)}% lev)`
     );
-    console.log(
-      `  Time: ${getReadableTime(worstTrade.openTimestamp)} ~ ${getReadableTime(
-        worstTrade.closeTimestamp
-      )}`
-    );
-    console.log(`  Hold: ${worstTrade.holdHours.toFixed(2)} hours`);
-  }
-
-  console.log("\nPosition Status");
-  console.log(`  Current Position: ${currentPositionType}`);
-
-  // Display trade history
-  if (tradeRecords.length > 0) {
-    console.log("\n" + "-".repeat(60));
-    console.log("Trade History");
-    console.log("-".repeat(60));
-
-    tradeRecords.forEach((trade, index) => {
-      const color = trade.pnl > 0 ? "\x1b[32m" : "\x1b[31m";
-      const resetColor = "\x1b[0m";
-      const pnlSign = trade.pnl > 0 ? "+" : "";
-
-      console.log(
-        `${color}Fund: ${trade.finalFund.toFixed(2)} ${trade.positionType} ` +
-          `[${trade.openPrice.toFixed(2)} -> ${trade.closePrice.toFixed(2)}] ` +
-          `(${pnlSign}${toPercentage(trade.pnlPercent)}) ` +
-          `[${getReadableTime(trade.openTimestamp)} ~ ${getReadableTime(
-            trade.closeTimestamp
-          )}] ` +
-          `(${trade.holdHours.toFixed(2)} hrs)${resetColor}`
-      );
-    });
   }
 
   const endTime = Date.now();
