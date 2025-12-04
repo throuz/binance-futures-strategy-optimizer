@@ -692,6 +692,40 @@ const getBacktestResult = ({
   return engine.run();
 };
 
+// Calculate spot buy and hold strategy result (no leverage, no funding fee)
+const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
+  if (!cachedKlineData || cachedKlineData.length === 0) {
+    return null;
+  }
+
+  const firstKline = cachedKlineData[0];
+  const lastKline = cachedKlineData[cachedKlineData.length - 1];
+
+  const buyPrice = firstKline.openPrice;
+  const sellPrice = lastKline.closePrice;
+  const initialFund = CONFIG.INITIAL_FUNDING;
+
+  // Spot trading: use all funds, no leverage
+  const orderAmountPercent = CONFIG.ORDER_AMOUNT_PERCENT / 100;
+  const openPriceReciprocal = 1 / buyPrice;
+  const orderQuantity = initialFund * orderAmountPercent * openPriceReciprocal;
+  const positionAmt = formatBySize(orderQuantity, stepSize);
+  const positionValue = positionAmt * buyPrice;
+  const openFee = positionValue * CONFIG.FEE;
+
+  // Calculate close (spot trading, no funding fee)
+  const closeFee = positionAmt * sellPrice * CONFIG.FEE;
+  const pnl = (sellPrice - buyPrice) * positionAmt - closeFee;
+  const finalFund = initialFund - positionValue - openFee + positionValue + pnl;
+
+  const totalReturn = (finalFund - initialFund) / initialFund;
+
+  return {
+    finalFund,
+    totalReturn
+  };
+};
+
 // Helper to increment numbers with decimals safely (keeps original behavior)
 const getAddedNumber = ({ number, addNumber, digit }) =>
   Number((number + addNumber).toFixed(digit));
@@ -854,6 +888,12 @@ if (bestResult.fund > 0) {
     leverage
   });
 
+  // Calculate spot buy and hold strategy result
+  const spotBuyAndHoldResult = getSpotBuyAndHoldResult(
+    cachedKlineData,
+    stepSize
+  );
+
   // 计算额外统计信息
   const tradeRecords = detailedResult.tradeRecords || [];
   const sortedByPnL = [...tradeRecords].sort((a, b) => b.pnl - a.pnl);
@@ -888,6 +928,27 @@ if (bestResult.fund > 0) {
       totalReturn * 100
     ).toFixed(2)}%`
   );
+
+  // Spot Buy and Hold Comparison
+  if (spotBuyAndHoldResult) {
+    const returnDiff = totalReturn - spotBuyAndHoldResult.totalReturn;
+    const returnDiffPercent = returnDiff * 100;
+    const outperformance = returnDiff >= 0 ? "OUTPERFORMS" : "UNDERPERFORMS";
+    const outperformanceColor = returnDiff >= 0 ? "\x1b[32m" : "\x1b[31m";
+    const resetColor = "\x1b[0m";
+
+    console.log("\nSpot Buy and Hold Comparison");
+    console.log(
+      `  Spot Holder Return: ${
+        spotBuyAndHoldResult.totalReturn > 0 ? "+" : ""
+      }${(spotBuyAndHoldResult.totalReturn * 100).toFixed(2)}%`
+    );
+    console.log(
+      `  ${outperformanceColor}Strategy ${outperformance} Spot Holder by ${Math.abs(
+        returnDiffPercent
+      ).toFixed(2)}%${resetColor}`
+    );
+  }
 
   console.log("\nStrategy Parameters");
   console.log(`  RSI Long Period:  ${rsiLongPeriod}`);
