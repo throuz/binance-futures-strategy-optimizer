@@ -31,7 +31,8 @@ const CONFIG = {
   KLINE_START_TIME: getTimestampYearsAgo(10), // timestamp or null
   IS_KLINE_START_TIME_TO_NOW: true,
   HOUR_MS: 1000 * 60 * 60,
-  FUNDING_PERIOD_MS: 8 * 1000 * 60 * 60 // 8 hours
+  FUNDING_PERIOD_MS: 8 * 1000 * 60 * 60, // 8 hours
+  MAX_DRAWDOWN_THRESHOLD: 0.5 // 50% - 最大可接受回撤（设为 null 则不限制）
 };
 
 // ============================================================================
@@ -379,6 +380,7 @@ class BacktestEngine {
     this.rsiShortLevel = strategyParams.rsiShortLevel;
     this.leverage = strategyParams.leverage;
     this.shouldLogResults = strategyParams.shouldLogResults || false;
+    this.maxDrawdownThreshold = strategyParams.maxDrawdownThreshold || null;
 
     // 状态变量
     this.fund = CONFIG.INITIAL_FUNDING;
@@ -548,6 +550,12 @@ class BacktestEngine {
     }
   }
 
+  // 回撤是否超過設定的最大閾值
+  isDrawdownExceeded() {
+    if (this.maxDrawdownThreshold === null) return false;
+    return this.maxDrawdown > this.maxDrawdownThreshold;
+  }
+
   closePositionAtEnd() {
     if (this.positionType !== "LONG") return;
 
@@ -595,7 +603,11 @@ class BacktestEngine {
         this.positionType === "LONG" ||
         this.peakFund > CONFIG.INITIAL_FUNDING
       ) {
+        // 先更新回撤，再根據設定檢查是否要提前終止
         this.updateDrawdown(curClosePrice);
+        if (this.isDrawdownExceeded()) {
+          return null;
+        }
       } else {
         if (this.fund > this.peakFund) {
           this.peakFund = this.fund;
@@ -639,14 +651,16 @@ const getBacktestResult = ({
   rsiPeriod,
   rsiLongLevel,
   rsiShortLevel,
-  leverage
+  leverage,
+  maxDrawdownThreshold = null
 }) => {
   const engine = new BacktestEngine(cachedKlineData, cachedRsiData, stepSize, {
     rsiPeriod,
     rsiLongLevel,
     rsiShortLevel,
     leverage,
-    shouldLogResults
+    shouldLogResults,
+    maxDrawdownThreshold
   });
   return engine.run();
 };
@@ -742,11 +756,14 @@ const getBestResult = async () => {
       cachedKlineData,
       cachedRsiData,
       stepSize,
+      maxDrawdownThreshold: CONFIG.MAX_DRAWDOWN_THRESHOLD,
       ...setting
     });
 
-    if (result && result.totalReturn > bestResult.totalReturn)
+    // 早期过滤已经在回测过程中完成，这里只需要检查结果是否有效
+    if (result && result.totalReturn > bestResult.totalReturn) {
       bestResult = result;
+    }
     progressBar.increment();
   }
 
