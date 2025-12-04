@@ -24,10 +24,10 @@ const CONFIG = {
   FEE: 0.0005, // 0.05%
   FUNDING_RATE: 0.0001, // 0.01%
   RSI_PERIOD_SETTING: { min: 1, max: 100, step: 1 },
-  RSI_LONG_LEVEL_SETTING: { min: 51, max: 100, step: 1 },
-  RSI_SHORT_LEVEL_SETTING: { min: 1, max: 50, step: 1 },
-  LEVERAGE_SETTING: { min: 1, max: 1, step: 1 },
-  RANDOM_SAMPLE_NUMBER: 100000, // number or null
+  RSI_LONG_LEVEL_SETTING: { min: 50, max: 100, step: 5 },
+  RSI_SHORT_LEVEL_SETTING: { min: 5, max: 50, step: 5 },
+  LEVERAGE_SETTING: { min: 1, max: 15, step: 1 },
+  RANDOM_SAMPLE_NUMBER: null, // number or null
   KLINE_START_TIME: getTimestampYearsAgo(10), // timestamp or null
   IS_KLINE_START_TIME_TO_NOW: true,
   HOUR_MS: 1000 * 60 * 60,
