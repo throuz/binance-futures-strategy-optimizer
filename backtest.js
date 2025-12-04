@@ -912,6 +912,54 @@ if (bestResult.fund > 0) {
           .reduce((sum, t) => sum + t.pnl, 0) / losingTrades
       : 0;
 
+  // Calculate additional metrics
+  const totalProfit =
+    winningTrades > 0
+      ? tradeRecords.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0)
+      : 0;
+  const totalLoss =
+    losingTrades > 0
+      ? Math.abs(
+          tradeRecords
+            .filter((t) => t.pnl < 0)
+            .reduce((sum, t) => sum + t.pnl, 0)
+        )
+      : 0;
+  const profitFactor =
+    totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
+  const avgWinLossRatio =
+    avgLoss !== 0 ? avgWin / Math.abs(avgLoss) : avgWin > 0 ? Infinity : 0;
+
+  // Calculate backtest time range
+  const firstKline = cachedKlineData[0];
+  const lastKline = cachedKlineData[cachedKlineData.length - 1];
+  const backtestStartTime = firstKline.openTime;
+  const backtestEndTime = lastKline.closeTime;
+  const backtestDays =
+    (backtestEndTime - backtestStartTime) / (1000 * 60 * 60 * 24);
+  const annualizedReturn =
+    backtestDays > 0 ? Math.pow(1 + totalReturn, 365 / backtestDays) - 1 : 0;
+
+  // Calculate max consecutive wins/losses
+  let maxConsecutiveWins = 0;
+  let maxConsecutiveLosses = 0;
+  let currentConsecutiveWins = 0;
+  let currentConsecutiveLosses = 0;
+  for (const trade of tradeRecords) {
+    if (trade.pnl > 0) {
+      currentConsecutiveWins++;
+      currentConsecutiveLosses = 0;
+      maxConsecutiveWins = Math.max(maxConsecutiveWins, currentConsecutiveWins);
+    } else if (trade.pnl < 0) {
+      currentConsecutiveLosses++;
+      currentConsecutiveWins = 0;
+      maxConsecutiveLosses = Math.max(
+        maxConsecutiveLosses,
+        currentConsecutiveLosses
+      );
+    }
+  }
+
   // Output optimized results
   console.log("\n" + "=".repeat(60));
   console.log("Backtest Results Summary");
@@ -972,9 +1020,35 @@ if (bestResult.fund > 0) {
   if (losingTrades > 0) {
     console.log(`  Avg Loss:         ${avgLoss.toFixed(2)}`);
   }
+  if (profitFactor !== Infinity && profitFactor > 0) {
+    console.log(`  Profit Factor:    ${profitFactor.toFixed(2)}`);
+  } else if (profitFactor === Infinity) {
+    console.log(`  Profit Factor:    ∞ (No losses)`);
+  }
+  if (avgWinLossRatio !== Infinity && avgWinLossRatio > 0) {
+    console.log(`  Avg Win/Loss:     ${avgWinLossRatio.toFixed(2)}`);
+  } else if (avgWinLossRatio === Infinity) {
+    console.log(`  Avg Win/Loss:     ∞ (No losses)`);
+  }
+  if (totalTrades > 0) {
+    console.log(`  Max Consecutive Wins:  ${maxConsecutiveWins}`);
+    console.log(`  Max Consecutive Losses: ${maxConsecutiveLosses}`);
+  }
 
   console.log("\nRisk Metrics");
   console.log(`  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%`);
+  if (backtestDays > 0) {
+    console.log(
+      `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
+        annualizedReturn * 100
+      ).toFixed(2)}%`
+    );
+  }
+
+  console.log("\nBacktest Period");
+  console.log(`  Start Time:       ${getReadableTime(backtestStartTime)}`);
+  console.log(`  End Time:         ${getReadableTime(backtestEndTime)}`);
+  console.log(`  Duration:         ${backtestDays.toFixed(2)} days`);
 
   if (bestTrade) {
     console.log("\nBest Trade");
