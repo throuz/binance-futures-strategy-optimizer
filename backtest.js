@@ -256,29 +256,29 @@ const computeRSI = (values, periods) => {
   return results;
 };
 
+/**
+ * 收集所有需要的RSI週期
+ */
+const collectRSIPeriods = () => {
+  const periodSet = new Set();
+  const longPeriods = generateParameterRange(CONFIG.RSI_LONG_PERIOD_SETTING);
+  const shortPeriods = generateParameterRange(CONFIG.RSI_SHORT_PERIOD_SETTING);
+
+  longPeriods.forEach((period) => periodSet.add(period));
+  shortPeriods.forEach((period) => periodSet.add(period));
+
+  return Array.from(periodSet);
+};
+
 const getRsiCache = async () => {
   if (shouldRefreshRsiCache()) {
     const values = await getClosePricesCache();
-
-    const periodSet = new Set();
-    for (
-      let period = CONFIG.RSI_LONG_PERIOD_SETTING.min;
-      period <= CONFIG.RSI_LONG_PERIOD_SETTING.max;
-      period += CONFIG.RSI_LONG_PERIOD_SETTING.step
-    ) {
-      periodSet.add(period);
-    }
-    for (
-      let period = CONFIG.RSI_SHORT_PERIOD_SETTING.min;
-      period <= CONFIG.RSI_SHORT_PERIOD_SETTING.max;
-      period += CONFIG.RSI_SHORT_PERIOD_SETTING.step
-    ) {
-      periodSet.add(period);
-    }
-    const periods = Array.from(periodSet);
-
+    const periods = collectRSIPeriods();
     const results = computeRSI(values, periods);
-    for (const period of periods) rsiCache.set(period, results[period]);
+
+    for (const period of periods) {
+      rsiCache.set(period, results[period]);
+    }
   }
   return rsiCache;
 };
@@ -335,6 +335,70 @@ const getStepSize = async () => {
 const toPercentage = (number) => `${Math.round(number * 100)}%`;
 const calculateHours = (open, close) => (close - open) / CONFIG.HOUR_MS;
 
+// ==================== Report Formatting Helper Functions ====================
+
+/**
+ * 格式化帶符號的百分比
+ */
+const formatSignedPercentage = (value) => {
+  const sign = value > 0 ? "+" : "";
+  return `${sign}${(value * 100).toFixed(2)}%`;
+};
+
+/**
+ * 格式化運行時間
+ */
+const formatRuntime = (totalRunTime) => {
+  const minutes = Math.floor(totalRunTime / 60);
+  const seconds = (totalRunTime % 60).toFixed(2);
+  if (minutes > 0) {
+    return `${minutes} minute(s) ${seconds} second(s)`;
+  }
+  return `${seconds} second(s)`;
+};
+
+/**
+ * 格式化交易記錄行
+ */
+const formatTradeRecordLine = (trade, index) => {
+  const pnlSign = trade.pnl > 0 ? "+" : "";
+  return `${String(index + 1).padStart(5)} | ${getReadableTime(
+    trade.openTimestamp
+  )} | ${getReadableTime(trade.closeTimestamp)} | ${trade.openPrice.toFixed(
+    2
+  )} | ${trade.closePrice.toFixed(2)} | ${pnlSign}${trade.pnl.toFixed(
+    2
+  )} | ${pnlSign}${toPercentage(trade.pnlPercent)} | ${trade.holdHours.toFixed(
+    2
+  )} | ${(trade.mae * 100).toFixed(2)}% | ${(trade.mfe * 100).toFixed(2)}%\n`;
+};
+
+/**
+ * 格式化單筆交易資訊
+ */
+const formatTradeInfo = (trade, title) => {
+  if (!trade) return "";
+  const pnlSign = trade.pnl > 0 ? "+" : "";
+  let info = `\n${title}\n`;
+  info += `  Return: ${pnlSign}${toPercentage(trade.pnlPercent)}\n`;
+  info += `  PnL:              ${pnlSign}${trade.pnl.toFixed(2)}\n`;
+  info += `  Entry Price:      ${trade.openPrice.toFixed(2)}\n`;
+  info += `  Exit Price:       ${trade.closePrice.toFixed(2)}\n`;
+  info += `  Time:             ${getReadableTime(
+    trade.openTimestamp
+  )} ~ ${getReadableTime(trade.closeTimestamp)}\n`;
+  info += `  Hold Time:        ${trade.holdHours.toFixed(2)} hours\n`;
+  info += `  MAE:              ${(trade.mae * 100).toFixed(2)}% (${(
+    trade.maeLeveraged * 100
+  ).toFixed(2)}% lev)\n`;
+  info += `  MFE:              ${(trade.mfe * 100).toFixed(2)}% (${(
+    trade.mfeLeveraged * 100
+  ).toFixed(2)}% lev)\n`;
+  return info;
+};
+
+// ==================== End of Report Formatting Helper Functions ====================
+
 const formatBacktestReport = ({
   bestResult,
   detailedResult,
@@ -383,13 +447,11 @@ const formatBacktestReport = ({
 
   report += "\nCore Performance\n";
   report += `  Final Fund:       ${fund.toFixed(2)}\n`;
-  report += `  Total Return:     ${totalReturn > 0 ? "+" : ""}${(
-    totalReturn * 100
-  ).toFixed(2)}%\n`;
+  report += `  Total Return:     ${formatSignedPercentage(totalReturn)}\n`;
   if (backtestDays > 0) {
-    report += `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
-      annualizedReturn * 100
-    ).toFixed(2)}%\n`;
+    report += `  Annualized Return: ${formatSignedPercentage(
+      annualizedReturn
+    )}\n`;
   }
 
   if (spotBuyAndHoldResult) {
@@ -447,54 +509,12 @@ const formatBacktestReport = ({
     backtestEndTime
   )}\n`;
 
-  if (bestTrade) {
-    report += "\nBest Trade\n";
-    const pnlSign = bestTrade.pnl > 0 ? "+" : "";
-    report += `  Return: ${pnlSign}${toPercentage(bestTrade.pnlPercent)}\n`;
-    report += `  PnL:              ${pnlSign}${bestTrade.pnl.toFixed(2)}\n`;
-    report += `  Entry Price:      ${bestTrade.openPrice.toFixed(2)}\n`;
-    report += `  Exit Price:       ${bestTrade.closePrice.toFixed(2)}\n`;
-    report += `  Time:             ${getReadableTime(
-      bestTrade.openTimestamp
-    )} ~ ${getReadableTime(bestTrade.closeTimestamp)}\n`;
-    report += `  Hold Time:        ${bestTrade.holdHours.toFixed(2)} hours\n`;
-    report += `  MAE:              ${(bestTrade.mae * 100).toFixed(2)}% (${(
-      bestTrade.maeLeveraged * 100
-    ).toFixed(2)}% lev)\n`;
-    report += `  MFE:              ${(bestTrade.mfe * 100).toFixed(2)}% (${(
-      bestTrade.mfeLeveraged * 100
-    ).toFixed(2)}% lev)\n`;
-  }
-
-  if (worstTrade) {
-    report += "\nWorst Trade\n";
-    const pnlSign = worstTrade.pnl > 0 ? "+" : "";
-    report += `  Return: ${pnlSign}${toPercentage(worstTrade.pnlPercent)}\n`;
-    report += `  PnL:              ${pnlSign}${worstTrade.pnl.toFixed(2)}\n`;
-    report += `  Entry Price:      ${worstTrade.openPrice.toFixed(2)}\n`;
-    report += `  Exit Price:       ${worstTrade.closePrice.toFixed(2)}\n`;
-    report += `  Time:             ${getReadableTime(
-      worstTrade.openTimestamp
-    )} ~ ${getReadableTime(worstTrade.closeTimestamp)}\n`;
-    report += `  Hold Time:        ${worstTrade.holdHours.toFixed(2)} hours\n`;
-    report += `  MAE:              ${(worstTrade.mae * 100).toFixed(2)}% (${(
-      worstTrade.maeLeveraged * 100
-    ).toFixed(2)}% lev)\n`;
-    report += `  MFE:              ${(worstTrade.mfe * 100).toFixed(2)}% (${(
-      worstTrade.mfeLeveraged * 100
-    ).toFixed(2)}% lev)\n`;
-  }
+  report += formatTradeInfo(bestTrade, "Best Trade");
+  report += formatTradeInfo(worstTrade, "Worst Trade");
 
   report += "\n" + "=".repeat(60) + "\n";
   report += "Execution Time\n";
-  const minutes = Math.floor(totalRunTime / 60);
-  const seconds = (totalRunTime % 60).toFixed(2);
-  if (minutes > 0) {
-    report += `  Total Runtime:    ${minutes} minute(s) ${seconds} second(s)\n`;
-  } else {
-    report += `  Total Runtime:    ${seconds} second(s)\n`;
-  }
-
+  report += `  Total Runtime:    ${formatRuntime(totalRunTime)}\n`;
   report += "=".repeat(60) + "\n";
 
   // Add detailed trade records
@@ -506,18 +526,7 @@ const formatBacktestReport = ({
       "Index | Entry Time | Exit Time | Entry Price | Exit Price | PnL | PnL % | Hold Hours | MAE | MFE\n";
     report += "-".repeat(120) + "\n";
     tradeRecords.forEach((trade, index) => {
-      const pnlSign = trade.pnl > 0 ? "+" : "";
-      report += `${String(index + 1).padStart(5)} | ${getReadableTime(
-        trade.openTimestamp
-      )} | ${getReadableTime(trade.closeTimestamp)} | ${trade.openPrice.toFixed(
-        2
-      )} | ${trade.closePrice.toFixed(2)} | ${pnlSign}${trade.pnl.toFixed(
-        2
-      )} | ${pnlSign}${toPercentage(
-        trade.pnlPercent
-      )} | ${trade.holdHours.toFixed(2)} | ${(trade.mae * 100).toFixed(
-        2
-      )}% | ${(trade.mfe * 100).toFixed(2)}%\n`;
+      report += formatTradeRecordLine(trade, index);
     });
   }
 
@@ -576,24 +585,53 @@ class BacktestEngine {
     return "NONE";
   }
 
-  calculateFundingFee(closePrice, closeTimestamp) {
+  /**
+   * 計算資金費用的週期數
+   */
+  calculateFundingPeriods(closeTimestamp) {
     if (!this.openTimestamp || !closeTimestamp) return 0;
     const periods = Math.floor(
       (closeTimestamp - this.openTimestamp) / CONFIG.FUNDING_PERIOD_MS
     );
-    if (periods <= 0) return 0;
+    return periods > 0 ? periods : 0;
+  }
+
+  calculateFundingFee(closePrice, closeTimestamp) {
+    const periods = this.calculateFundingPeriods(closeTimestamp);
+    if (periods === 0) return 0;
     return this.positionAmt * closePrice * CONFIG.FUNDING_RATE * periods;
+  }
+
+  /**
+   * 計算訂單數量
+   */
+  calculateOrderQuantity(price) {
+    const priceReciprocal = 1 / price;
+    return (
+      this.fund * this.orderAmountPercent * this.leverage * priceReciprocal
+    );
+  }
+
+  /**
+   * 計算持倉價值和費用
+   */
+  calculatePositionValueAndFee(positionAmount, price) {
+    const positionValue = positionAmount * price;
+    const fee = positionValue * CONFIG.FEE;
+    const positionFund = positionValue * this.leverageReciprocal;
+    return { positionValue, fee, positionFund };
   }
 
   openLongPosition(kline) {
     this.openPrice = kline.openPrice;
-    const openPriceReciprocal = 1 / this.openPrice;
-    const orderQuantity =
-      this.fund * this.orderAmountPercent * this.leverage * openPriceReciprocal;
+    const orderQuantity = this.calculateOrderQuantity(this.openPrice);
     this.positionAmt = formatBySize(orderQuantity, this.stepSize);
-    const positionValue = this.positionAmt * this.openPrice;
-    const fee = positionValue * CONFIG.FEE;
-    this.positionFund = positionValue * this.leverageReciprocal;
+    const { fee, positionFund } = this.calculatePositionValueAndFee(
+      this.positionAmt,
+      this.openPrice
+    );
+
+    this.positionFund = positionFund;
     this.fund -= this.positionFund + fee;
     this.positionType = "LONG";
     this.openTimestamp = kline.openTime;
@@ -602,13 +640,20 @@ class BacktestEngine {
     this.positionMinPrice = kline.lowPrice;
   }
 
+  /**
+   * 計算平倉的PnL
+   */
+  calculateClosePnL(closePrice, closeTimestamp) {
+    const fee = this.positionAmt * closePrice * CONFIG.FEE;
+    const fundingFee = this.calculateFundingFee(closePrice, closeTimestamp);
+    const priceChange = (closePrice - this.openPrice) * this.positionAmt;
+    return priceChange - fee - fundingFee;
+  }
+
   closeLongPosition(kline) {
     const closePrice = kline.openPrice;
     const closeTimestamp = kline.openTime;
-    const fee = this.positionAmt * closePrice * CONFIG.FEE;
-    const fundingFee = this.calculateFundingFee(closePrice, closeTimestamp);
-    const pnl =
-      (closePrice - this.openPrice) * this.positionAmt - fee - fundingFee;
+    const pnl = this.calculateClosePnL(closePrice, closeTimestamp);
 
     if (this.shouldLogResults) {
       this.logTradeResult({
@@ -624,33 +669,41 @@ class BacktestEngine {
   }
 
   calculateFundingFeeForClose(closePrice, closeTimestamp) {
-    if (!this.openTimestamp || !closeTimestamp) return 0;
-    const periods = Math.floor(
-      (closeTimestamp - this.openTimestamp) / CONFIG.FUNDING_PERIOD_MS
-    );
-    if (periods <= 0) return 0;
-    return this.positionAmt * closePrice * CONFIG.FUNDING_RATE * periods;
+    return this.calculateFundingFee(closePrice, closeTimestamp);
+  }
+
+  /**
+   * 計算MAE和MFE（最大不利偏移和最大有利偏移）
+   */
+  calculateMAEAndMFE() {
+    if (
+      this.positionType !== "LONG" ||
+      !this.positionMinPrice ||
+      !this.positionMaxPrice
+    ) {
+      return {
+        mae: 0,
+        mfe: 0,
+        maeLeveraged: 0,
+        mfeLeveraged: 0
+      };
+    }
+
+    const mae = -(this.openPrice - this.positionMinPrice) / this.openPrice;
+    const mfe = (this.positionMaxPrice - this.openPrice) / this.openPrice;
+    return {
+      mae,
+      mfe,
+      maeLeveraged: mae * this.leverage,
+      mfeLeveraged: mfe * this.leverage
+    };
   }
 
   logTradeResult({ closePrice, closeTimestamp, pnl }) {
     const finalFund = this.fund + this.positionFund + pnl;
     const pnlPercent = pnl / this.positionFund;
     const holdHours = calculateHours(this.openTimestamp, closeTimestamp);
-
-    let mae = 0;
-    let mfe = 0;
-    let maeLeveraged = 0;
-    let mfeLeveraged = 0;
-    if (
-      this.positionType === "LONG" &&
-      this.positionMinPrice &&
-      this.positionMaxPrice
-    ) {
-      mae = -(this.openPrice - this.positionMinPrice) / this.openPrice;
-      mfe = (this.positionMaxPrice - this.openPrice) / this.openPrice;
-      maeLeveraged = mae * this.leverage;
-      mfeLeveraged = mfe * this.leverage;
-    }
+    const { mae, mfe, maeLeveraged, mfeLeveraged } = this.calculateMAEAndMFE();
 
     this.tradeRecords.push({
       finalFund,
@@ -703,16 +756,22 @@ class BacktestEngine {
     return false;
   }
 
-  updateDrawdown(curClosePrice) {
-    let currentTotalFund;
+  /**
+   * 計算當前總資金
+   */
+  calculateCurrentTotalFund(curClosePrice) {
     if (this.positionType === "LONG") {
-      currentTotalFund =
+      return (
         this.fund +
         this.positionFund +
-        (curClosePrice - this.openPrice) * this.positionAmt;
-    } else {
-      currentTotalFund = this.fund;
+        (curClosePrice - this.openPrice) * this.positionAmt
+      );
     }
+    return this.fund;
+  }
+
+  updateDrawdown(curClosePrice) {
+    const currentTotalFund = this.calculateCurrentTotalFund(curClosePrice);
 
     if (currentTotalFund > this.peakFund) {
       this.peakFund = currentTotalFund;
@@ -729,6 +788,18 @@ class BacktestEngine {
     return this.maxDrawdown > this.maxDrawdownThreshold;
   }
 
+  /**
+   * 更新持倉的最高價和最低價
+   */
+  updatePositionPriceRange(highPrice, lowPrice) {
+    if (highPrice > this.positionMaxPrice) {
+      this.positionMaxPrice = highPrice;
+    }
+    if (lowPrice < this.positionMinPrice) {
+      this.positionMinPrice = lowPrice;
+    }
+  }
+
   closePositionAtEnd() {
     if (this.positionType !== "LONG") return;
 
@@ -736,20 +807,8 @@ class BacktestEngine {
     const closePrice = lastKline.closePrice;
     const closeTimestamp = lastKline.closeTime;
 
-    if (lastKline.highPrice > this.positionMaxPrice) {
-      this.positionMaxPrice = lastKline.highPrice;
-    }
-    if (lastKline.lowPrice < this.positionMinPrice) {
-      this.positionMinPrice = lastKline.lowPrice;
-    }
-
-    const fee = this.positionAmt * closePrice * CONFIG.FEE;
-    const fundingFee = this.calculateFundingFeeForClose(
-      closePrice,
-      closeTimestamp
-    );
-    const pnl =
-      (closePrice - this.openPrice) * this.positionAmt - fee - fundingFee;
+    this.updatePositionPriceRange(lastKline.highPrice, lastKline.lowPrice);
+    const pnl = this.calculateClosePnL(closePrice, closeTimestamp);
 
     if (this.shouldLogResults) {
       this.logTradeResult({
@@ -787,12 +846,7 @@ class BacktestEngine {
       }
 
       if (this.positionType === "LONG") {
-        if (curHighPrice > this.positionMaxPrice) {
-          this.positionMaxPrice = curHighPrice;
-        }
-        if (curLowPrice < this.positionMinPrice) {
-          this.positionMinPrice = curLowPrice;
-        }
+        this.updatePositionPriceRange(curHighPrice, curLowPrice);
       }
 
       const signal = this.getSignal(preRsiLong, preRsiShort);
@@ -877,6 +931,253 @@ const getBacktestResult = ({
   return engine.run();
 };
 
+// ==================== Calculation Helper Functions ====================
+
+/**
+ * 計算交易統計數據
+ */
+const calculateTradeStatistics = (tradeRecords) => {
+  const winningTrades = tradeRecords.filter((t) => t.pnl > 0);
+  const losingTrades = tradeRecords.filter((t) => t.pnl < 0);
+
+  const totalProfit =
+    winningTrades.length > 0
+      ? winningTrades.reduce((sum, t) => sum + t.pnl, 0)
+      : 0;
+
+  const totalLoss =
+    losingTrades.length > 0
+      ? Math.abs(losingTrades.reduce((sum, t) => sum + t.pnl, 0))
+      : 0;
+
+  const profitFactor =
+    totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
+
+  return { totalProfit, totalLoss, profitFactor };
+};
+
+/**
+ * 計算平均MAE和MFE
+ */
+const calculateAverageMAEAndMFE = (tradeRecords) => {
+  if (tradeRecords.length === 0) {
+    return {
+      avgMAE: 0,
+      avgMFE: 0,
+      avgMAELeveraged: 0,
+      avgMFELeveraged: 0
+    };
+  }
+
+  const totalMAE = tradeRecords.reduce((sum, t) => sum + t.mae, 0);
+  const totalMFE = tradeRecords.reduce((sum, t) => sum + t.mfe, 0);
+  const totalMAELeveraged = tradeRecords.reduce(
+    (sum, t) => sum + t.maeLeveraged,
+    0
+  );
+  const totalMFELeveraged = tradeRecords.reduce(
+    (sum, t) => sum + t.mfeLeveraged,
+    0
+  );
+
+  const length = tradeRecords.length;
+  return {
+    avgMAE: totalMAE / length,
+    avgMFE: totalMFE / length,
+    avgMAELeveraged: totalMAELeveraged / length,
+    avgMFELeveraged: totalMFELeveraged / length
+  };
+};
+
+/**
+ * 計算年化報酬率
+ */
+const calculateAnnualizedReturn = (totalReturn, backtestDays) => {
+  return backtestDays > 0
+    ? Math.pow(1 + totalReturn, 365 / backtestDays) - 1
+    : 0;
+};
+
+/**
+ * 計算Calmar Ratio
+ */
+const calculateCalmarRatio = (annualizedReturn, maxDrawdown) => {
+  if (maxDrawdown > 0) {
+    return annualizedReturn / maxDrawdown;
+  }
+  return annualizedReturn > 0 ? Infinity : 0;
+};
+
+/**
+ * 計算週期性回報和持倉時間
+ */
+const calculatePeriodicReturnsAndExposure = (
+  tradeRecords,
+  backtestStartTime,
+  backtestEndTime
+) => {
+  const periodicReturns = [];
+  let previousFund = CONFIG.INITIAL_FUNDING;
+  let totalPositionTime = 0;
+
+  for (const trade of tradeRecords) {
+    const periodReturn = (trade.finalFund - previousFund) / previousFund;
+    periodicReturns.push(periodReturn);
+    previousFund = trade.finalFund;
+    totalPositionTime += trade.closeTimestamp - trade.openTimestamp;
+  }
+
+  const totalBacktestTime = backtestEndTime - backtestStartTime;
+  const exposure =
+    totalBacktestTime > 0 ? (totalPositionTime / totalBacktestTime) * 100 : 0;
+
+  return { periodicReturns, exposure };
+};
+
+/**
+ * 計算Sharpe Ratio
+ */
+const calculateSharpeRatio = (periodicReturns, backtestDays) => {
+  if (periodicReturns.length <= 1) return 0;
+
+  const meanReturn =
+    periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
+  const variance =
+    periodicReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) /
+    (periodicReturns.length - 1);
+  const stdDev = Math.sqrt(variance);
+
+  if (stdDev <= 0 || backtestDays <= 0) return 0;
+
+  const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
+  const annualizedStdDev = stdDev * Math.sqrt(tradesPerYear);
+  const annualizedMeanReturn = meanReturn * tradesPerYear;
+
+  return annualizedMeanReturn / annualizedStdDev;
+};
+
+/**
+ * 計算Sortino Ratio
+ */
+const calculateSortinoRatio = (periodicReturns, backtestDays) => {
+  if (periodicReturns.length <= 1) return 0;
+
+  const meanReturn =
+    periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
+  const downsideReturns = periodicReturns.filter((r) => r < 0);
+
+  if (downsideReturns.length === 0) return 0;
+
+  const downsideVariance =
+    downsideReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) /
+    downsideReturns.length;
+  const downsideStdDev = Math.sqrt(downsideVariance);
+
+  if (downsideStdDev <= 0 || backtestDays <= 0) return 0;
+
+  const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
+  const annualizedStdDev = downsideStdDev * Math.sqrt(tradesPerYear);
+  const annualizedMeanReturn = meanReturn * tradesPerYear;
+
+  return annualizedMeanReturn / annualizedStdDev;
+};
+
+/**
+ * 提取最佳和最差交易
+ */
+const extractBestAndWorstTrades = (tradeRecords) => {
+  if (tradeRecords.length === 0) {
+    return { bestTrade: undefined, worstTrade: undefined };
+  }
+
+  const sortedByPnLPercent = [...tradeRecords].sort(
+    (a, b) => b.pnlPercent - a.pnlPercent
+  );
+
+  return {
+    bestTrade: sortedByPnLPercent[0],
+    worstTrade: sortedByPnLPercent[sortedByPnLPercent.length - 1]
+  };
+};
+
+/**
+ * 計算回測期間資訊
+ */
+const calculateBacktestPeriod = (cachedKlineData) => {
+  const firstKline = cachedKlineData[0];
+  const lastKline = cachedKlineData[cachedKlineData.length - 1];
+  const backtestStartTime = firstKline.openTime;
+  const backtestEndTime = lastKline.closeTime;
+  const backtestDays =
+    (backtestEndTime - backtestStartTime) / (1000 * 60 * 60 * 24);
+
+  return { backtestStartTime, backtestEndTime, backtestDays };
+};
+
+/**
+ * 計算所有回測報告所需的指標
+ */
+const calculateAllBacktestMetrics = (
+  bestResult,
+  detailedResult,
+  cachedKlineData
+) => {
+  const tradeRecords = detailedResult.tradeRecords || [];
+  const { totalReturn, maxDrawdown } = bestResult;
+
+  // 提取最佳和最差交易
+  const { bestTrade, worstTrade } = extractBestAndWorstTrades(tradeRecords);
+
+  // 計算交易統計
+  const { totalProfit, totalLoss, profitFactor } =
+    calculateTradeStatistics(tradeRecords);
+
+  // 計算平均MAE/MFE
+  const { avgMAE, avgMFE, avgMAELeveraged, avgMFELeveraged } =
+    calculateAverageMAEAndMFE(tradeRecords);
+
+  // 計算回測期間
+  const { backtestStartTime, backtestEndTime, backtestDays } =
+    calculateBacktestPeriod(cachedKlineData);
+
+  // 計算年化報酬率和風險指標
+  const annualizedReturn = calculateAnnualizedReturn(totalReturn, backtestDays);
+  const calmarRatio = calculateCalmarRatio(annualizedReturn, maxDrawdown);
+
+  // 計算週期性回報和持倉時間
+  const { periodicReturns, exposure } = calculatePeriodicReturnsAndExposure(
+    tradeRecords,
+    backtestStartTime,
+    backtestEndTime
+  );
+
+  // 計算風險調整後報酬率
+  const sharpeRatio = calculateSharpeRatio(periodicReturns, backtestDays);
+  const sortinoRatio = calculateSortinoRatio(periodicReturns, backtestDays);
+
+  return {
+    bestTrade,
+    worstTrade,
+    totalProfit,
+    totalLoss,
+    profitFactor,
+    avgMAE,
+    avgMFE,
+    avgMAELeveraged,
+    avgMFELeveraged,
+    backtestStartTime,
+    backtestEndTime,
+    backtestDays,
+    annualizedReturn,
+    calmarRatio,
+    sharpeRatio,
+    sortinoRatio,
+    exposure
+  };
+};
+
+// ==================== End of Calculation Helper Functions ====================
+
 const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
   if (!cachedKlineData || cachedKlineData.length === 0) {
     return null;
@@ -911,53 +1212,49 @@ const getSpotBuyAndHoldResult = (cachedKlineData, stepSize) => {
 const getAddedNumber = ({ number, addNumber, digit }) =>
   Number((number + addNumber).toFixed(digit));
 
-const getSettings = () => {
-  const settings = [];
+/**
+ * 生成參數範圍數組
+ */
+const generateParameterRange = (setting) => {
+  const range = [];
   for (
-    let leverage = CONFIG.LEVERAGE_SETTING.min;
-    leverage <= CONFIG.LEVERAGE_SETTING.max;
-    leverage = getAddedNumber({
-      number: leverage,
-      addNumber: CONFIG.LEVERAGE_SETTING.step,
+    let value = setting.min;
+    value <= setting.max;
+    value = getAddedNumber({
+      number: value,
+      addNumber: setting.step,
       digit: 0
     })
   ) {
-    for (
-      let rsiLongPeriod = CONFIG.RSI_LONG_PERIOD_SETTING.min;
-      rsiLongPeriod <= CONFIG.RSI_LONG_PERIOD_SETTING.max;
-      rsiLongPeriod = getAddedNumber({
-        number: rsiLongPeriod,
-        addNumber: CONFIG.RSI_LONG_PERIOD_SETTING.step,
-        digit: 0
-      })
-    ) {
-      for (
-        let rsiShortPeriod = CONFIG.RSI_SHORT_PERIOD_SETTING.min;
-        rsiShortPeriod <= CONFIG.RSI_SHORT_PERIOD_SETTING.max;
-        rsiShortPeriod = getAddedNumber({
-          number: rsiShortPeriod,
-          addNumber: CONFIG.RSI_SHORT_PERIOD_SETTING.step,
-          digit: 0
-        })
-      ) {
-        for (
-          let rsiLongLevel = CONFIG.RSI_LONG_LEVEL_SETTING.min;
-          rsiLongLevel <= CONFIG.RSI_LONG_LEVEL_SETTING.max;
-          rsiLongLevel = getAddedNumber({
-            number: rsiLongLevel,
-            addNumber: CONFIG.RSI_LONG_LEVEL_SETTING.step,
-            digit: 0
-          })
-        ) {
-          for (
-            let rsiShortLevel = CONFIG.RSI_SHORT_LEVEL_SETTING.min;
-            rsiShortLevel <= CONFIG.RSI_SHORT_LEVEL_SETTING.max;
-            rsiShortLevel = getAddedNumber({
-              number: rsiShortLevel,
-              addNumber: CONFIG.RSI_SHORT_LEVEL_SETTING.step,
-              digit: 0
-            })
-          ) {
+    range.push(value);
+  }
+  return range;
+};
+
+/**
+ * 生成所有策略參數組合
+ */
+const getSettings = () => {
+  const settings = [];
+  const leverageRange = generateParameterRange(CONFIG.LEVERAGE_SETTING);
+  const rsiLongPeriodRange = generateParameterRange(
+    CONFIG.RSI_LONG_PERIOD_SETTING
+  );
+  const rsiShortPeriodRange = generateParameterRange(
+    CONFIG.RSI_SHORT_PERIOD_SETTING
+  );
+  const rsiLongLevelRange = generateParameterRange(
+    CONFIG.RSI_LONG_LEVEL_SETTING
+  );
+  const rsiShortLevelRange = generateParameterRange(
+    CONFIG.RSI_SHORT_LEVEL_SETTING
+  );
+
+  for (const leverage of leverageRange) {
+    for (const rsiLongPeriod of rsiLongPeriodRange) {
+      for (const rsiShortPeriod of rsiShortPeriodRange) {
+        for (const rsiLongLevel of rsiLongLevelRange) {
+          for (const rsiShortLevel of rsiShortLevelRange) {
             settings.push({
               rsiLongPeriod,
               rsiShortPeriod,
@@ -970,17 +1267,26 @@ const getSettings = () => {
       }
     }
   }
+
   return settings;
+};
+
+/**
+ * Fisher-Yates 洗牌算法
+ */
+const shuffleArray = (array) => {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
 };
 
 const getRandomSettings = () => {
   const settings = getSettings();
   if (CONFIG.RANDOM_SAMPLE_NUMBER) {
-    const shuffled = [...settings];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-    }
+    const shuffled = shuffleArray(settings);
     return shuffled.slice(
       0,
       Math.min(CONFIG.RANDOM_SAMPLE_NUMBER, shuffled.length)
@@ -1066,118 +1372,28 @@ if (bestResult.fund > 0) {
     stepSize
   );
 
+  // 計算所有回測指標
+  const {
+    bestTrade,
+    worstTrade,
+    totalProfit,
+    totalLoss,
+    profitFactor,
+    avgMAE,
+    avgMFE,
+    avgMAELeveraged,
+    avgMFELeveraged,
+    backtestStartTime,
+    backtestEndTime,
+    backtestDays,
+    annualizedReturn,
+    calmarRatio,
+    sharpeRatio,
+    sortinoRatio,
+    exposure
+  } = calculateAllBacktestMetrics(bestResult, detailedResult, cachedKlineData);
+
   const tradeRecords = detailedResult.tradeRecords || [];
-  const sortedByPnLPercent = [...tradeRecords].sort(
-    (a, b) => b.pnlPercent - a.pnlPercent
-  );
-  const bestTrade = sortedByPnLPercent[0];
-  const worstTrade = sortedByPnLPercent[sortedByPnLPercent.length - 1];
-
-  const totalProfit =
-    winningTrades > 0
-      ? tradeRecords.filter((t) => t.pnl > 0).reduce((sum, t) => sum + t.pnl, 0)
-      : 0;
-  const totalLoss =
-    losingTrades > 0
-      ? Math.abs(
-          tradeRecords
-            .filter((t) => t.pnl < 0)
-            .reduce((sum, t) => sum + t.pnl, 0)
-        )
-      : 0;
-  const profitFactor =
-    totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? Infinity : 0;
-
-  let avgMAE = 0;
-  let avgMFE = 0;
-  let avgMAELeveraged = 0;
-  let avgMFELeveraged = 0;
-  if (tradeRecords.length > 0) {
-    const totalMAE = tradeRecords.reduce((sum, t) => sum + t.mae, 0);
-    const totalMFE = tradeRecords.reduce((sum, t) => sum + t.mfe, 0);
-    const totalMAELeveraged = tradeRecords.reduce(
-      (sum, t) => sum + t.maeLeveraged,
-      0
-    );
-    const totalMFELeveraged = tradeRecords.reduce(
-      (sum, t) => sum + t.mfeLeveraged,
-      0
-    );
-    avgMAE = totalMAE / tradeRecords.length;
-    avgMFE = totalMFE / tradeRecords.length;
-    avgMAELeveraged = totalMAELeveraged / tradeRecords.length;
-    avgMFELeveraged = totalMFELeveraged / tradeRecords.length;
-  }
-
-  const firstKline = cachedKlineData[0];
-  const lastKline = cachedKlineData[cachedKlineData.length - 1];
-  const backtestStartTime = firstKline.openTime;
-  const backtestEndTime = lastKline.closeTime;
-  const backtestDays =
-    (backtestEndTime - backtestStartTime) / (1000 * 60 * 60 * 24);
-  const annualizedReturn =
-    backtestDays > 0 ? Math.pow(1 + totalReturn, 365 / backtestDays) - 1 : 0;
-
-  const calmarRatio =
-    maxDrawdown > 0
-      ? annualizedReturn / maxDrawdown
-      : annualizedReturn > 0
-      ? Infinity
-      : 0;
-
-  let periodicReturns = [];
-  let previousFund = CONFIG.INITIAL_FUNDING;
-
-  let totalPositionTime = 0;
-  let totalBacktestTime = backtestEndTime - backtestStartTime;
-
-  for (const trade of tradeRecords) {
-    const periodReturn = (trade.finalFund - previousFund) / previousFund;
-    periodicReturns.push(periodReturn);
-    previousFund = trade.finalFund;
-
-    totalPositionTime += trade.closeTimestamp - trade.openTimestamp;
-  }
-
-  const exposure =
-    totalBacktestTime > 0 ? (totalPositionTime / totalBacktestTime) * 100 : 0;
-
-  let sharpeRatio = 0;
-  if (periodicReturns.length > 1) {
-    const meanReturn =
-      periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
-    const variance =
-      periodicReturns.reduce((sum, r) => sum + Math.pow(r - meanReturn, 2), 0) /
-      (periodicReturns.length - 1);
-    const stdDev = Math.sqrt(variance);
-
-    if (stdDev > 0 && backtestDays > 0) {
-      const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
-      const annualizedStdDev = stdDev * Math.sqrt(tradesPerYear);
-      const annualizedMeanReturn = meanReturn * tradesPerYear;
-      sharpeRatio = annualizedMeanReturn / annualizedStdDev;
-    }
-  }
-
-  let sortinoRatio = 0;
-  if (periodicReturns.length > 1) {
-    const meanReturn =
-      periodicReturns.reduce((a, b) => a + b, 0) / periodicReturns.length;
-    const downsideReturns = periodicReturns.filter((r) => r < 0);
-    if (downsideReturns.length > 0) {
-      const downsideVariance =
-        downsideReturns.reduce((sum, r) => sum + Math.pow(r, 2), 0) /
-        downsideReturns.length;
-      const downsideStdDev = Math.sqrt(downsideVariance);
-
-      if (downsideStdDev > 0 && backtestDays > 0) {
-        const tradesPerYear = (periodicReturns.length / backtestDays) * 365;
-        const annualizedStdDev = downsideStdDev * Math.sqrt(tradesPerYear);
-        const annualizedMeanReturn = meanReturn * tradesPerYear;
-        sortinoRatio = annualizedMeanReturn / annualizedStdDev;
-      }
-    }
-  }
 
   const endTime = Date.now();
   const totalRunTime = (endTime - startTime) / 1000;
@@ -1207,10 +1423,25 @@ if (bestResult.fund > 0) {
     totalRunTime
   });
 
+  /**
+   * 生成報告文件名
+   */
+  const generateReportFilename = () => {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return `backtest-report-${timestamp}.txt`;
+  };
+
+  /**
+   * 保存報告到文件
+   */
+  const saveReportToFile = async (report) => {
+    const filename = generateReportFilename();
+    await writeFile(filename, report, "utf-8");
+    return filename;
+  };
+
   // Write report to file
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `backtest-report-${timestamp}.txt`;
-  await writeFile(filename, report, "utf-8");
+  const filename = await saveReportToFile(report);
 
   // Only log minimal info
   console.log("\n✓ Backtest completed successfully");
@@ -1218,9 +1449,7 @@ if (bestResult.fund > 0) {
 } else {
   const report =
     "\n" + "=".repeat(60) + "\nNo valid result found\n" + "=".repeat(60) + "\n";
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `backtest-report-${timestamp}.txt`;
-  await writeFile(filename, report, "utf-8");
+  const filename = await saveReportToFile(report);
   console.log("\n✗ No valid result found");
   console.log(`✓ Report saved to: ${filename}`);
 }
