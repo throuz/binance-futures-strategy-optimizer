@@ -1,4 +1,5 @@
 import { Presets, SingleBar } from "cli-progress";
+import { writeFile } from "fs/promises";
 
 function getTimestampYearsAgo(years) {
   const currentDate = new Date();
@@ -19,7 +20,7 @@ const CONFIG = {
   RSI_SHORT_PERIOD_SETTING: { min: 5, max: 100, step: 5 },
   RSI_LONG_LEVEL_SETTING: { min: 5, max: 100, step: 5 },
   RSI_SHORT_LEVEL_SETTING: { min: 5, max: 100, step: 5 },
-  LEVERAGE_SETTING: { min: 1, max: 5, step: 1 },
+  LEVERAGE_SETTING: { min: 1, max: 1, step: 1 },
   RANDOM_SAMPLE_NUMBER: null,
   KLINE_START_TIME: getTimestampYearsAgo(10),
   IS_KLINE_START_TIME_TO_NOW: true,
@@ -333,6 +334,195 @@ const getStepSize = async () => {
 
 const toPercentage = (number) => `${Math.round(number * 100)}%`;
 const calculateHours = (open, close) => (close - open) / CONFIG.HOUR_MS;
+
+const formatBacktestReport = ({
+  bestResult,
+  detailedResult,
+  spotBuyAndHoldResult,
+  tradeRecords,
+  bestTrade,
+  worstTrade,
+  totalProfit,
+  totalLoss,
+  profitFactor,
+  avgMAE,
+  avgMFE,
+  avgMAELeveraged,
+  avgMFELeveraged,
+  backtestStartTime,
+  backtestEndTime,
+  backtestDays,
+  annualizedReturn,
+  calmarRatio,
+  sharpeRatio,
+  sortinoRatio,
+  exposure,
+  totalRunTime
+}) => {
+  const {
+    currentPositionType,
+    fund,
+    rsiLongPeriod,
+    rsiShortPeriod,
+    rsiLongLevel,
+    rsiShortLevel,
+    leverage,
+    totalTrades,
+    winningTrades,
+    losingTrades,
+    winRate,
+    totalPnl,
+    totalReturn,
+    maxDrawdown,
+    averageHoldTimeHours
+  } = bestResult;
+
+  let report = "\n" + "=".repeat(60) + "\n";
+  report += "Backtest Results Summary\n";
+  report += "=".repeat(60) + "\n";
+
+  report += "\nCore Performance\n";
+  report += `  Final Fund:       ${fund.toFixed(2)}\n`;
+  report += `  Total Return:     ${totalReturn > 0 ? "+" : ""}${(
+    totalReturn * 100
+  ).toFixed(2)}%\n`;
+  if (backtestDays > 0) {
+    report += `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
+      annualizedReturn * 100
+    ).toFixed(2)}%\n`;
+  }
+
+  if (spotBuyAndHoldResult) {
+    const returnDiff = totalReturn - spotBuyAndHoldResult.totalReturn;
+    const returnDiffPercent = returnDiff * 100;
+    const outperformance = returnDiff >= 0 ? "OUTPERFORMS" : "UNDERPERFORMS";
+    report += `  vs Spot Holder: ${outperformance} by ${Math.abs(
+      returnDiffPercent
+    ).toFixed(2)}%\n`;
+  }
+
+  report += "\nStrategy Parameters\n";
+  report += `  RSI Long Period:  ${rsiLongPeriod}\n`;
+  report += `  RSI Short Period: ${rsiShortPeriod}\n`;
+  report += `  RSI Long Level:   ${rsiLongLevel}\n`;
+  report += `  RSI Short Level:  ${rsiShortLevel}\n`;
+  report += `  Leverage:         ${leverage}x\n`;
+
+  report += "\nRisk Metrics\n";
+  report += `  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%\n`;
+  if (calmarRatio !== Infinity && calmarRatio > 0) {
+    report += `  Calmar Ratio:     ${calmarRatio.toFixed(2)}\n`;
+  } else if (calmarRatio === Infinity) {
+    report += `  Calmar Ratio:     ∞ (No drawdown)\n`;
+  }
+  if (sharpeRatio !== 0) {
+    report += `  Sharpe Ratio:     ${sharpeRatio.toFixed(2)}\n`;
+  }
+  if (sortinoRatio !== 0) {
+    report += `  Sortino Ratio:    ${sortinoRatio.toFixed(2)}\n`;
+  }
+
+  report += "\nTrading Statistics\n";
+  report += `  Total Trades:     ${totalTrades}\n`;
+  report += `  Win Rate:         ${(winRate * 100).toFixed(2)}%\n`;
+  if (profitFactor !== Infinity && profitFactor > 0) {
+    report += `  Profit Factor:    ${profitFactor.toFixed(2)}\n`;
+  } else if (profitFactor === Infinity) {
+    report += `  Profit Factor:    ∞ (No losses)\n`;
+  }
+  report += `  Avg Hold Time:    ${averageHoldTimeHours.toFixed(2)} hours\n`;
+  report += `  Exposure:         ${exposure.toFixed(2)}%\n`;
+  if (tradeRecords.length > 0) {
+    report += `  Avg MAE:          ${(avgMAE * 100).toFixed(2)}% (${(
+      avgMAELeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+    report += `  Avg MFE:          ${(avgMFE * 100).toFixed(2)}% (${(
+      avgMFELeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+  }
+
+  report += "\nBacktest Period\n";
+  report += `  Duration:         ${backtestDays.toFixed(2)} days\n`;
+  report += `  ${getReadableTime(backtestStartTime)} ~ ${getReadableTime(
+    backtestEndTime
+  )}\n`;
+
+  if (bestTrade) {
+    report += "\nBest Trade\n";
+    const pnlSign = bestTrade.pnl > 0 ? "+" : "";
+    report += `  Return: ${pnlSign}${toPercentage(bestTrade.pnlPercent)}\n`;
+    report += `  PnL:              ${pnlSign}${bestTrade.pnl.toFixed(2)}\n`;
+    report += `  Entry Price:      ${bestTrade.openPrice.toFixed(2)}\n`;
+    report += `  Exit Price:       ${bestTrade.closePrice.toFixed(2)}\n`;
+    report += `  Time:             ${getReadableTime(
+      bestTrade.openTimestamp
+    )} ~ ${getReadableTime(bestTrade.closeTimestamp)}\n`;
+    report += `  Hold Time:        ${bestTrade.holdHours.toFixed(2)} hours\n`;
+    report += `  MAE:              ${(bestTrade.mae * 100).toFixed(2)}% (${(
+      bestTrade.maeLeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+    report += `  MFE:              ${(bestTrade.mfe * 100).toFixed(2)}% (${(
+      bestTrade.mfeLeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+  }
+
+  if (worstTrade) {
+    report += "\nWorst Trade\n";
+    const pnlSign = worstTrade.pnl > 0 ? "+" : "";
+    report += `  Return: ${pnlSign}${toPercentage(worstTrade.pnlPercent)}\n`;
+    report += `  PnL:              ${pnlSign}${worstTrade.pnl.toFixed(2)}\n`;
+    report += `  Entry Price:      ${worstTrade.openPrice.toFixed(2)}\n`;
+    report += `  Exit Price:       ${worstTrade.closePrice.toFixed(2)}\n`;
+    report += `  Time:             ${getReadableTime(
+      worstTrade.openTimestamp
+    )} ~ ${getReadableTime(worstTrade.closeTimestamp)}\n`;
+    report += `  Hold Time:        ${worstTrade.holdHours.toFixed(2)} hours\n`;
+    report += `  MAE:              ${(worstTrade.mae * 100).toFixed(2)}% (${(
+      worstTrade.maeLeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+    report += `  MFE:              ${(worstTrade.mfe * 100).toFixed(2)}% (${(
+      worstTrade.mfeLeveraged * 100
+    ).toFixed(2)}% lev)\n`;
+  }
+
+  report += "\n" + "=".repeat(60) + "\n";
+  report += "Execution Time\n";
+  const minutes = Math.floor(totalRunTime / 60);
+  const seconds = (totalRunTime % 60).toFixed(2);
+  if (minutes > 0) {
+    report += `  Total Runtime:    ${minutes} minute(s) ${seconds} second(s)\n`;
+  } else {
+    report += `  Total Runtime:    ${seconds} second(s)\n`;
+  }
+
+  report += "=".repeat(60) + "\n";
+
+  // Add detailed trade records
+  if (tradeRecords.length > 0) {
+    report += "\n" + "=".repeat(60) + "\n";
+    report += "Detailed Trade Records\n";
+    report += "=".repeat(60) + "\n\n";
+    report +=
+      "Index | Entry Time | Exit Time | Entry Price | Exit Price | PnL | PnL % | Hold Hours | MAE | MFE\n";
+    report += "-".repeat(120) + "\n";
+    tradeRecords.forEach((trade, index) => {
+      const pnlSign = trade.pnl > 0 ? "+" : "";
+      report += `${String(index + 1).padStart(5)} | ${getReadableTime(
+        trade.openTimestamp
+      )} | ${getReadableTime(trade.closeTimestamp)} | ${trade.openPrice.toFixed(
+        2
+      )} | ${trade.closePrice.toFixed(2)} | ${pnlSign}${trade.pnl.toFixed(
+        2
+      )} | ${pnlSign}${toPercentage(
+        trade.pnlPercent
+      )} | ${trade.holdHours.toFixed(2)} | ${(trade.mae * 100).toFixed(
+        2
+      )}% | ${(trade.mfe * 100).toFixed(2)}%\n`;
+    });
+  }
+
+  return report;
+};
 
 class BacktestEngine {
   constructor(cachedKlineData, cachedRsiData, stepSize, strategyParams) {
@@ -989,171 +1179,48 @@ if (bestResult.fund > 0) {
     }
   }
 
-  console.log("\n" + "=".repeat(60));
-  console.log("Backtest Results Summary");
-  console.log("=".repeat(60));
-
-  console.log("\nCore Performance");
-  console.log(`  Final Fund:       ${fund.toFixed(2)}`);
-  console.log(
-    `  Total Return:     ${totalReturn > 0 ? "+" : ""}${(
-      totalReturn * 100
-    ).toFixed(2)}%`
-  );
-  if (backtestDays > 0) {
-    console.log(
-      `  Annualized Return: ${annualizedReturn > 0 ? "+" : ""}${(
-        annualizedReturn * 100
-      ).toFixed(2)}%`
-    );
-  }
-
-  if (spotBuyAndHoldResult) {
-    const returnDiff = totalReturn - spotBuyAndHoldResult.totalReturn;
-    const returnDiffPercent = returnDiff * 100;
-    const outperformance = returnDiff >= 0 ? "OUTPERFORMS" : "UNDERPERFORMS";
-    const outperformanceColor = returnDiff >= 0 ? "\x1b[32m" : "\x1b[31m";
-    const resetColor = "\x1b[0m";
-
-    console.log(
-      `  ${outperformanceColor}vs Spot Holder: ${outperformance} by ${Math.abs(
-        returnDiffPercent
-      ).toFixed(2)}%${resetColor}`
-    );
-  }
-
-  console.log("\nStrategy Parameters");
-  console.log(`  RSI Long Period:  ${rsiLongPeriod}`);
-  console.log(`  RSI Short Period: ${rsiShortPeriod}`);
-  console.log(`  RSI Long Level:   ${rsiLongLevel}`);
-  console.log(`  RSI Short Level:  ${rsiShortLevel}`);
-  console.log(`  Leverage:         ${leverage}x`);
-
-  console.log("\nRisk Metrics");
-  console.log(`  Max Drawdown:     ${(maxDrawdown * 100).toFixed(2)}%`);
-  if (calmarRatio !== Infinity && calmarRatio > 0) {
-    console.log(`  Calmar Ratio:     ${calmarRatio.toFixed(2)}`);
-  } else if (calmarRatio === Infinity) {
-    console.log(`  Calmar Ratio:     ∞ (No drawdown)`);
-  }
-  if (sharpeRatio !== 0) {
-    console.log(`  Sharpe Ratio:     ${sharpeRatio.toFixed(2)}`);
-  }
-  if (sortinoRatio !== 0) {
-    console.log(`  Sortino Ratio:    ${sortinoRatio.toFixed(2)}`);
-  }
-
-  console.log("\nTrading Statistics");
-  console.log(`  Total Trades:     ${totalTrades}`);
-  console.log(`  Win Rate:         ${(winRate * 100).toFixed(2)}%`);
-  if (profitFactor !== Infinity && profitFactor > 0) {
-    console.log(`  Profit Factor:    ${profitFactor.toFixed(2)}`);
-  } else if (profitFactor === Infinity) {
-    console.log(`  Profit Factor:    ∞ (No losses)`);
-  }
-  console.log(`  Avg Hold Time:    ${averageHoldTimeHours.toFixed(2)} hours`);
-  console.log(`  Exposure:         ${exposure.toFixed(2)}%`);
-  if (tradeRecords.length > 0) {
-    console.log(
-      `  Avg MAE:          ${(avgMAE * 100).toFixed(2)}% (${(
-        avgMAELeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-    console.log(
-      `  Avg MFE:          ${(avgMFE * 100).toFixed(2)}% (${(
-        avgMFELeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-  }
-
-  console.log("\nBacktest Period");
-  console.log(`  Duration:         ${backtestDays.toFixed(2)} days`);
-  console.log(
-    `  ${getReadableTime(backtestStartTime)} ~ ${getReadableTime(
-      backtestEndTime
-    )}`
-  );
-
-  if (bestTrade) {
-    console.log("\nBest Trade");
-    const bestColor = "\x1b[32m";
-    const resetColor = "\x1b[0m";
-    const pnlSign = bestTrade.pnl > 0 ? "+" : "";
-    console.log(
-      `  ${bestColor}Return: ${pnlSign}${toPercentage(
-        bestTrade.pnlPercent
-      )}${resetColor}`
-    );
-    console.log(`  PnL:              ${pnlSign}${bestTrade.pnl.toFixed(2)}`);
-    console.log(`  Entry Price:      ${bestTrade.openPrice.toFixed(2)}`);
-    console.log(`  Exit Price:       ${bestTrade.closePrice.toFixed(2)}`);
-    console.log(
-      `  Time:             ${getReadableTime(
-        bestTrade.openTimestamp
-      )} ~ ${getReadableTime(bestTrade.closeTimestamp)}`
-    );
-    console.log(`  Hold Time:        ${bestTrade.holdHours.toFixed(2)} hours`);
-    console.log(
-      `  MAE:              ${(bestTrade.mae * 100).toFixed(2)}% (${(
-        bestTrade.maeLeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-    console.log(
-      `  MFE:              ${(bestTrade.mfe * 100).toFixed(2)}% (${(
-        bestTrade.mfeLeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-  }
-
-  if (worstTrade) {
-    console.log("\nWorst Trade");
-    const worstColor = "\x1b[31m";
-    const resetColor = "\x1b[0m";
-    const pnlSign = worstTrade.pnl > 0 ? "+" : "";
-    console.log(
-      `  ${worstColor}Return: ${pnlSign}${toPercentage(
-        worstTrade.pnlPercent
-      )}${resetColor}`
-    );
-    console.log(`  PnL:              ${pnlSign}${worstTrade.pnl.toFixed(2)}`);
-    console.log(`  Entry Price:      ${worstTrade.openPrice.toFixed(2)}`);
-    console.log(`  Exit Price:       ${worstTrade.closePrice.toFixed(2)}`);
-    console.log(
-      `  Time:             ${getReadableTime(
-        worstTrade.openTimestamp
-      )} ~ ${getReadableTime(worstTrade.closeTimestamp)}`
-    );
-    console.log(`  Hold Time:        ${worstTrade.holdHours.toFixed(2)} hours`);
-    console.log(
-      `  MAE:              ${(worstTrade.mae * 100).toFixed(2)}% (${(
-        worstTrade.maeLeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-    console.log(
-      `  MFE:              ${(worstTrade.mfe * 100).toFixed(2)}% (${(
-        worstTrade.mfeLeveraged * 100
-      ).toFixed(2)}% lev)`
-    );
-  }
-
   const endTime = Date.now();
   const totalRunTime = (endTime - startTime) / 1000;
-  const minutes = Math.floor(totalRunTime / 60);
-  const seconds = (totalRunTime % 60).toFixed(2);
 
-  console.log("\n" + "=".repeat(60));
-  console.log("Execution Time");
-  if (minutes > 0) {
-    console.log(
-      `  Total Runtime:    ${minutes} minute(s) ${seconds} second(s)`
-    );
-  } else {
-    console.log(`  Total Runtime:    ${seconds} second(s)`);
-  }
+  const report = formatBacktestReport({
+    bestResult,
+    detailedResult,
+    spotBuyAndHoldResult,
+    tradeRecords,
+    bestTrade,
+    worstTrade,
+    totalProfit,
+    totalLoss,
+    profitFactor,
+    avgMAE,
+    avgMFE,
+    avgMAELeveraged,
+    avgMFELeveraged,
+    backtestStartTime,
+    backtestEndTime,
+    backtestDays,
+    annualizedReturn,
+    calmarRatio,
+    sharpeRatio,
+    sortinoRatio,
+    exposure,
+    totalRunTime
+  });
 
-  console.log("=".repeat(60) + "\n");
+  // Write report to file
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `backtest-report-${timestamp}.txt`;
+  await writeFile(filename, report, "utf-8");
+
+  // Only log minimal info
+  console.log("\n✓ Backtest completed successfully");
+  console.log(`✓ Report saved to: ${filename}`);
 } else {
-  console.log("\n" + "=".repeat(60));
-  console.log("No valid result found");
-  console.log("=".repeat(60) + "\n");
+  const report =
+    "\n" + "=".repeat(60) + "\nNo valid result found\n" + "=".repeat(60) + "\n";
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `backtest-report-${timestamp}.txt`;
+  await writeFile(filename, report, "utf-8");
+  console.log("\n✗ No valid result found");
+  console.log(`✓ Report saved to: ${filename}`);
 }
